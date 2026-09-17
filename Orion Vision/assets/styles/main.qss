@@ -1,0 +1,49 @@
+QMainWindow { 
+    background-color: rgb(24, 22, 22); 
+}
+
+QFrame#HeaderFrame { 
+    background-color: rgb(12, 10, 10); 
+    border-bottom: 2px solid rgb(168, 108, 56); 
+}
+
+QLabel#TitleLabel { 
+    color: rgb(212, 195, 153); 
+    font-family: 'Impact'; 
+    font-size: 36px; 
+}
+
+QLabel#SubTitleLabel { 
+    color: rgb(184, 98, 48); 
+    font-family: 'Arial'; 
+    font-weight: bold; 
+    font-size: 14px; 
+}
+
+QFrame#CardFrame { 
+    background-color: rgb(12, 10, 10); 
+    border: 1px solid rgb(80, 52, 34); 
+    border-radius: 4px; 
+}
+
+QFrame#CardFrame:hover { 
+    border: 1px solid rgb(168, 108, 56); 
+}
+
+QLabel { 
+    color: rgb(212, 195, 153); 
+    font-family: 'Arial'; 
+}
+
+QPushButton { 
+    background-color: rgb(24, 22, 22); 
+    color: rgb(212, 195, 153); 
+    border: 1px solid rgb(168, 108, 56); 
+    padding: 10px 20px; 
+    font-weight: bold; 
+}
+
+QPushButton:hover { 
+    background-color: rgb(184, 98, 48); 
+    color: rgb(12, 10, 10); 
+}
