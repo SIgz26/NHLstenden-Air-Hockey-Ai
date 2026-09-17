@@ -1,3 +1,9 @@
+#
+#versie: 1.0.1
+#door: Timo Zylstra
+#datum: 17-09-2026
+#nieuw:gige_worker.py, Diagnose_Tool.py, gige_diagnose.py en gige_vmbpy.py zijn aan gemaakt om de GigE camera werkende te krijgen.
+#
 import os
 import sys
 import ctypes
@@ -13,6 +19,9 @@ from ui.main_menu import OrionMainMenu
 from ui.dashboard import OrionDashboard
 
 ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("orion.vision.app.1.0")
+
+
+
 
 
 def load_stylesheet(app, qss_path):
