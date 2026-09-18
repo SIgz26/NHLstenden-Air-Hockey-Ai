@@ -1,3 +1,9 @@
+#
+#versie: BETA 1.0.2
+#door: Timo Zylstra
+#datum: 18-09-2026
+#nieuw:geluids effect toegevoegd bij hover over buttons. ook in de live_dashboard is er nu een recard button en een knop waar je kan selecteren waar de opnamen naar toe moet, hier bij kan je ook aangeven wat de fps moet zijn van de opnamen. 
+#
 import os
 import sys
 import ctypes
@@ -13,6 +19,9 @@ from ui.main_menu import OrionMainMenu
 from ui.dashboard import OrionDashboard
 
 ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("orion.vision.app.1.0")
+
+
+
 
 
 def load_stylesheet(app, qss_path):
