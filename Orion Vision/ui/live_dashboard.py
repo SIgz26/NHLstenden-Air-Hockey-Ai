@@ -108,10 +108,15 @@ class OrionLiveDashboard(QWidget):
 
     def _build_content(self) -> QHBoxLayout:
         content = QHBoxLayout()
-        content.setContentsMargins(30, 10, 30, 30)
-        content.setSpacing(20)
-        content.addWidget(self._build_control_card(), stretch=1)
-        content.addWidget(self._build_display_card(),  stretch=3)
+        content.setContentsMargins(20, 10, 20, 20)
+        content.setSpacing(14)
+
+        control_card = self._build_control_card()
+        control_card.setMinimumWidth(260)
+        control_card.setMaximumWidth(300)
+
+        content.addWidget(control_card, stretch=0)
+        content.addWidget(self._build_display_card(), stretch=1)
         return content
 
     # ── Control card ──────────────────────────────────────────────────
@@ -119,23 +124,29 @@ class OrionLiveDashboard(QWidget):
     def _build_control_card(self) -> QFrame:
         card = QFrame()
         card.setObjectName("CardFrame")
+        card.setMinimumWidth(260)
+        card.setMaximumWidth(300)
         layout = QVBoxLayout(card)
-        layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(12)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
 
         layout.addWidget(self._section_label("CAMERA DEVICE"))
 
         self.combo_camera = QComboBox()
-        self.btn_refresh_cams = QPushButton("REFRESH CAMERAS")
+        self.btn_refresh_cams = QPushButton("REFRESH")
+        self.btn_refresh_cams.setMinimumHeight(28)
         self.btn_refresh_cams.clicked.connect(self.refresh_cameras)
 
-        self.btn_start = QPushButton("START LIVE STREAM")
+        self.btn_start = QPushButton("START LIVE")
+        self.btn_start.setMinimumHeight(32)
         self.btn_start.clicked.connect(self.toggle_stream)
 
         self.btn_debug = QPushButton("DEBUG")
+        self.btn_debug.setMinimumHeight(28)
         self.btn_debug.clicked.connect(self._open_debug_window)
 
         self.btn_record = QPushButton("START RECORDING")
+        self.btn_record.setMinimumHeight(32)
         self.btn_record.setEnabled(False)
         self.btn_record.clicked.connect(self._toggle_recording)
 
@@ -148,7 +159,8 @@ class OrionLiveDashboard(QWidget):
         self.recording_dir_label = QLabel(f"Opname map: {self.recording_dir}")
         self.recording_dir_label.setWordWrap(True)
 
-        self.btn_select_record_folder = QPushButton("SELECT SAVE FOLDER")
+        self.btn_select_record_folder = QPushButton("SAVE FOLDER")
+        self.btn_select_record_folder.setMinimumHeight(28)
         self.btn_select_record_folder.clicked.connect(self._select_recording_dir)
 
         self.status_label = QLabel("Status: Selecteer een camera")
@@ -168,9 +180,10 @@ class OrionLiveDashboard(QWidget):
         # View mode
         layout.addWidget(self._section_label("VIEW MODE"))
         self.combo_view = QComboBox()
+        self.combo_view.setMinimumHeight(28)
         self.combo_view.addItems([
-            "Single View (Live Result)",
-            "Dual View (Result + Mask)",
+            "Single View",
+            "Dual View",
         ])
         self.combo_view.currentIndexChanged.connect(self._change_view_mode)
         layout.addWidget(self.combo_view)
@@ -201,7 +214,8 @@ class OrionLiveDashboard(QWidget):
         )
         row.addWidget(self.color_preview)
 
-        self.btn_pick_color = QPushButton("PICK COLOR")
+        self.btn_pick_color = QPushButton("PICK")
+        self.btn_pick_color.setMinimumHeight(28)
         self.btn_pick_color.clicked.connect(self._enable_color_picker)
         row.addWidget(self.btn_pick_color)
         row.addStretch()

@@ -11,7 +11,8 @@ from PyQt5.QtGui import QIcon
 from intro.intro_widget import OrionIntroWidget
 from ui.main_menu import OrionMainMenu
 from ui.dashboard import OrionDashboard
-from ui.live_dashboard import OrionLiveDashboard  # <-- Importeer het live dashboard
+from ui.live_dashboard import OrionLiveDashboard
+from ui.settings_dashboard import OrionSettingsDashboard
 from ui.sound_manager import HoverSoundManager
 
 
@@ -33,6 +34,7 @@ class OrionMainWindow(QMainWindow):
         self.main_menu_widget = None
         self.dashboard_widget = None
         self.live_dashboard_widget = None
+        self.settings_dashboard_widget = None
 
         self.intro_widget = OrionIntroWidget(on_finished_callback=self.show_main_menu)
         self.stack.addWidget(self.intro_widget)
@@ -46,6 +48,8 @@ class OrionMainWindow(QMainWindow):
             widgets.append(self.dashboard_widget)
         if self.live_dashboard_widget is not None:
             widgets.append(self.live_dashboard_widget)
+        if self.settings_dashboard_widget is not None:
+            widgets.append(self.settings_dashboard_widget)
 
         for widget in widgets:
             self.hover_sound_manager.register_widget(widget)
@@ -68,6 +72,15 @@ class OrionMainWindow(QMainWindow):
             self.stack.addWidget(self.live_dashboard_widget)
             self.hover_sound_manager.register_widget(self.live_dashboard_widget)
 
+    def _ensure_settings_dashboard(self):
+        if self.settings_dashboard_widget is None:
+            self.settings_dashboard_widget = OrionSettingsDashboard(
+                on_back_callback=self.show_main_menu,
+                hover_sound_manager=self.hover_sound_manager,
+            )
+            self.stack.addWidget(self.settings_dashboard_widget)
+            self.hover_sound_manager.register_widget(self.settings_dashboard_widget)
+
     def show_main_menu(self):
         self._ensure_main_menu()
         self.stack.setCurrentWidget(self.main_menu_widget)
@@ -80,4 +93,5 @@ class OrionMainWindow(QMainWindow):
             self._ensure_live_dashboard()
             self.stack.setCurrentWidget(self.live_dashboard_widget)
         elif module_name == "settings":
-            print("Settings geopend")
+            self._ensure_settings_dashboard()
+            self.stack.setCurrentWidget(self.settings_dashboard_widget)
