@@ -19,19 +19,26 @@ class OrionIntroWidget(QWidget):
         self.TEXT_COLOR = QColor(212, 195, 153)
 
         self.scanline_overlay = None
+        self.audio_started = False
 
         # Audio
         self.player = QMediaPlayer()
-        self.play_audio()
 
         # Animation Loop (60 FPS)
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.update_animation)
         self.timer.start(16)
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self.audio_started:
+            self.audio_started = True
+            self.play_audio()
+
     def reset(self):
         """Reset de intro-animatie zodat deze opnieuw afgespeeld kan worden."""
         self.elapsed = 0.0
         self.timer.start(16)
+        self.audio_started = False
         self.play_audio()
         self.update()
         
