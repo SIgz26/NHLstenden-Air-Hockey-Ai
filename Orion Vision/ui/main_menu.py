@@ -18,7 +18,7 @@ class OrionMainMenu(QWidget):
         top_bar = QHBoxLayout()
         
         header_text_layout = QVBoxLayout()
-        title_label = QLabel("ORION AI VISION ENGINE BETA 1.0.2")
+        title_label = QLabel("ORION AI VISION ENGINE BETA 1.0.3")
         title_label.setObjectName("TitleLabel")
         subtitle_label = QLabel("// SELECT MODULE TO LAUNCH")
         subtitle_label.setObjectName("SubTitleLabel")
