@@ -1,8 +1,8 @@
 #
-#versie: BETA 1.0.2
+#versie: BETA 1.0.3
 #door: Timo Zylstra
 #datum: 18-09-2026
-#nieuw:geluids effect toegevoegd bij hover over buttons. ook in de live_dashboard is er nu een recard button en een knop waar je kan selecteren waar de opnamen naar toe moet, hier bij kan je ook aangeven wat de fps moet zijn van de opnamen. 
+#nieuw: settings dashboard toegevoegd met hover sound toggle
 #
 import os
 import sys

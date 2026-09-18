@@ -14,6 +14,7 @@ class HoverSoundManager(QObject):
         self.player = QMediaPlayer(self)
         self.player.setVolume(30)
         self.hover_sound_path = self._resolve_hover_sound_path()
+        self.enabled = True
         self._last_hover_time = 0.0
         self._media_loaded = False
 
@@ -64,7 +65,18 @@ class HoverSoundManager(QObject):
             self.play_hover()
         return super().eventFilter(obj, event)
 
+    def set_enabled(self, enabled: bool):
+        self.enabled = bool(enabled)
+        if not self.enabled:
+            try:
+                self.player.stop()
+            except Exception:
+                pass
+
     def play_hover(self):
+        if not self.enabled:
+            return
+
         if not os.path.exists(self.hover_sound_path):
             return
 
