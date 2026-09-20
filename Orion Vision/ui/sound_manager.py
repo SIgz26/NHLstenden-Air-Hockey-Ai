@@ -27,9 +27,9 @@ class HoverSoundManager(QObject):
         audio_dir = os.path.abspath(os.path.join(base_dir, "assets", "audio"))
 
         candidates = [
-            os.path.join(audio_dir, "hover.wav"),
-            os.path.join(audio_dir, "ui_menuMove.wav"),
-            os.path.join(audio_dir, "battlefront_hover.wav"),
+            os.path.join(audio_dir, "ui_load_lp.wav"),
+            os.path.join(audio_dir, "ui_load_lp.wav"),
+            os.path.join(audio_dir, "ui_load_lp.wav"),
         ]
 
         for path in candidates:

@@ -114,12 +114,15 @@ class LiveCameraWorker(QThread):
         if hasattr(cv2, "setLogLevel"):
             cv2.setLogLevel(0)
 
+        backend = cv2.CAP_DSHOW if os.name == "nt" else cv2.CAP_ANY
         for i in range(max_checks):
-            cap = cv2.VideoCapture(i, cv2.CAP_ANY)
-            if cap.isOpened():
-                ret, _ = cap.read()
-                if ret:
-                    available.append(i)
+            cap = cv2.VideoCapture(i, backend)
+            try:
+                if cap.isOpened():
+                    ret, _ = cap.read()
+                    if ret:
+                        available.append(i)
+            finally:
                 cap.release()
 
         if hasattr(cv2, "setLogLevel") and old_level is not None:

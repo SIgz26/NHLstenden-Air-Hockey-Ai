@@ -1,7 +1,14 @@
 from datetime import datetime
 
 from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import QDialog, QHBoxLayout, QPlainTextEdit, QPushButton, QVBoxLayout
+from PyQt5.QtWidgets import (
+    QApplication,
+    QDialog,
+    QHBoxLayout,
+    QPlainTextEdit,
+    QPushButton,
+    QVBoxLayout,
+)
 
 
 class CameraDebugDialog(QDialog):
@@ -51,9 +58,4 @@ class CameraDebugDialog(QDialog):
     def copy_logs(self) -> None:
         text = self.log_view.toPlainText()
         if text:
-            clipboard = self.parent().windowHandle().clipboard() if self.parent() else None
-            if clipboard is not None:
-                clipboard.setText(text)
-            else:
-                self.log_view.selectAll()
-                self.log_view.copy()
+            QApplication.clipboard().setText(text)
