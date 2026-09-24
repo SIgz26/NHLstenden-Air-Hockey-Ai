@@ -1,8 +1,8 @@
 #
-#versie: BETA 1.1.0
+#versie: BETA 1.1.1
 #door: Timo Zylstra
-#datum: 18-09-2026
-#nieuw: nu worden enignes aangeroepen om de beeld verwerking te doen, en daar in kunnen models worden geladen en gebruikt.
+#datum: 24-09-2026
+#nieuw: engine selecter en settings menu toegevoegd. hierbij ook de functie gekregen om de fisheye correctie aan, uit te zetten en de settings er van aan te passen.
 #
 import os
 import sys

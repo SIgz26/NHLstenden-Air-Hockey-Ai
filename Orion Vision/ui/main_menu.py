@@ -1,3 +1,11 @@
+#
+#versie: BETA 1.1.1
+#door: Timo Zylstra
+#datum: 24-09-2026
+#nieuw: 
+#
+
+
 from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame
 from PyQt5.QtGui import QFont
 from PyQt5.QtCore import Qt
