@@ -1,8 +1,8 @@
 #
-#versie: BETA 1.0.3
+#versie: BETA 1.1.0
 #door: Timo Zylstra
 #datum: 18-09-2026
-#nieuw: settings dashboard toegevoegd met hover sound toggle
+#nieuw: nu worden enignes aangeroepen om de beeld verwerking te doen, en daar in kunnen models worden geladen en gebruikt.
 #
 import os
 import sys

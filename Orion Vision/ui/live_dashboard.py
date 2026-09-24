@@ -1,13 +1,10 @@
-import os
-import time
-
 import cv2
 import numpy as np
 
 from PyQt5.QtCore import Qt, pyqtSignal, QThread, QObject
 from PyQt5.QtGui import QPixmap
 from PyQt5.QtWidgets import (
-    QComboBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout,
+    QComboBox, QFrame, QGridLayout, QHBoxLayout,
     QLabel, QPushButton, QSizePolicy, QSlider, QVBoxLayout, QWidget,
 )
 
@@ -66,11 +63,6 @@ class OrionLiveDashboard(QWidget):
         # Expliciete union-type: kan LiveCameraWorker of GigECameraWorker zijn
         self.live_worker: CameraWorker | None = None
         self.on_back = on_back_callback
-        self.recording_dir = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "recordings",
-        )
-        self._last_feed_refresh = 0.0
         self._init_ui()
 
     # ──────────────────────────────────────────────────────────────────
@@ -108,15 +100,10 @@ class OrionLiveDashboard(QWidget):
 
     def _build_content(self) -> QHBoxLayout:
         content = QHBoxLayout()
-        content.setContentsMargins(20, 10, 20, 20)
-        content.setSpacing(14)
-
-        control_card = self._build_control_card()
-        control_card.setMinimumWidth(260)
-        control_card.setMaximumWidth(300)
-
-        content.addWidget(control_card, stretch=0)
-        content.addWidget(self._build_display_card(), stretch=1)
+        content.setContentsMargins(30, 10, 30, 30)
+        content.setSpacing(20)
+        content.addWidget(self._build_control_card(), stretch=1)
+        content.addWidget(self._build_display_card(),  stretch=3)
         return content
 
     # ── Control card ──────────────────────────────────────────────────
@@ -124,54 +111,39 @@ class OrionLiveDashboard(QWidget):
     def _build_control_card(self) -> QFrame:
         card = QFrame()
         card.setObjectName("CardFrame")
-        card.setMinimumWidth(260)
-        card.setMaximumWidth(300)
         layout = QVBoxLayout(card)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(8)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(12)
 
         layout.addWidget(self._section_label("CAMERA DEVICE"))
 
         self.combo_camera = QComboBox()
-        self.btn_refresh_cams = QPushButton("REFRESH")
-        self.btn_refresh_cams.setMinimumHeight(28)
+        self.btn_refresh_cams = QPushButton("REFRESH CAMERAS")
         self.btn_refresh_cams.clicked.connect(self.refresh_cameras)
 
-        self.btn_start = QPushButton("START LIVE")
-        self.btn_start.setMinimumHeight(32)
+        self.combo_engine = QComboBox()
+        self.combo_engine.addItems([
+            "HSV Detection",
+            "Hough Circle",
+            "Background Subtraction",
+            "Circle Contour",
+            "Hybrid",
+        ])
+        self.combo_engine.setCurrentText("HSV Detection")
+
+        self.btn_start = QPushButton("START LIVE STREAM")
         self.btn_start.clicked.connect(self.toggle_stream)
 
         self.btn_debug = QPushButton("DEBUG")
-        self.btn_debug.setMinimumHeight(28)
         self.btn_debug.clicked.connect(self._open_debug_window)
-
-        self.btn_record = QPushButton("START RECORDING")
-        self.btn_record.setMinimumHeight(32)
-        self.btn_record.setEnabled(False)
-        self.btn_record.clicked.connect(self._toggle_recording)
-
-        self.fps_label = QLabel("Record FPS: 20")
-        self.combo_record_fps = QComboBox()
-        self.combo_record_fps.addItems(["5", "10", "15", "20", "25", "30", "60"])
-        self.combo_record_fps.setCurrentText("20")
-        self.combo_record_fps.currentIndexChanged.connect(self._apply_fps_settings)
-
-        self.recording_dir_label = QLabel(f"Opname map: {self.recording_dir}")
-        self.recording_dir_label.setWordWrap(True)
-
-        self.btn_select_record_folder = QPushButton("SAVE FOLDER")
-        self.btn_select_record_folder.setMinimumHeight(28)
-        self.btn_select_record_folder.clicked.connect(self._select_recording_dir)
 
         self.status_label = QLabel("Status: Selecteer een camera")
         self.status_label.setWordWrap(True)
 
         for widget in (
-            self.combo_camera, self.btn_refresh_cams,
-            self.btn_start, self.btn_debug, self.btn_record,
-            self.fps_label, self.combo_record_fps,
-            self.recording_dir_label, self.btn_select_record_folder,
-            self.status_label,
+            self.combo_camera, self.combo_engine,
+            self.btn_refresh_cams, self.btn_start,
+            self.btn_debug, self.status_label,
         ):
             layout.addWidget(widget)
 
@@ -180,10 +152,9 @@ class OrionLiveDashboard(QWidget):
         # View mode
         layout.addWidget(self._section_label("VIEW MODE"))
         self.combo_view = QComboBox()
-        self.combo_view.setMinimumHeight(28)
         self.combo_view.addItems([
-            "Single View",
-            "Dual View",
+            "Single View (Live Result)",
+            "Dual View (Result + Mask)",
         ])
         self.combo_view.currentIndexChanged.connect(self._change_view_mode)
         layout.addWidget(self.combo_view)
@@ -214,8 +185,7 @@ class OrionLiveDashboard(QWidget):
         )
         row.addWidget(self.color_preview)
 
-        self.btn_pick_color = QPushButton("PICK")
-        self.btn_pick_color.setMinimumHeight(28)
+        self.btn_pick_color = QPushButton("PICK COLOR")
         self.btn_pick_color.clicked.connect(self._enable_color_picker)
         row.addWidget(self.btn_pick_color)
         row.addStretch()
@@ -320,6 +290,9 @@ class OrionLiveDashboard(QWidget):
         else:
             self.live_worker = LiveCameraWorker(camera_index=payload["id"])
 
+        engine_name = self.combo_engine.currentText()
+        self.live_worker.set_engine(engine_name)
+
         # Signalen koppelen – interface is identiek voor beide workers
         self.live_worker.frame_processed.connect(self._update_feed)
         self.live_worker.status_signal.connect(self.status_label.setText)
@@ -327,16 +300,12 @@ class OrionLiveDashboard(QWidget):
             self.live_worker.debug_signal.connect(self._append_debug)
 
         self._sync_vision_settings()
-        if hasattr(self.live_worker, "set_record_fps"):
-            self.live_worker.set_record_fps(float(self.combo_record_fps.currentText()))
-        self._apply_fps_settings()
         self.live_worker.start()
 
         self.btn_start.setText("STOP LIVE STREAM")
         self.btn_refresh_cams.setEnabled(False)
         self.combo_camera.setEnabled(False)
         self.btn_pause.setEnabled(True)
-        self.btn_record.setEnabled(True)
 
     def _stop_stream(self) -> None:
         if self.live_worker is None:
@@ -355,8 +324,6 @@ class OrionLiveDashboard(QWidget):
         self.combo_camera.setEnabled(True)
         self.btn_pause.setEnabled(False)
         self.btn_pause.setText("FREEZE FRAME")
-        self.btn_record.setEnabled(False)
-        self.btn_record.setText("START RECORDING")
 
     # ──────────────────────────────────────────────────────────────────
     # Slots & event handlers
@@ -433,51 +400,8 @@ class OrionLiveDashboard(QWidget):
             f"Kleur ingesteld | H:{h_val}  S:{s_val}  V:{v_val}"
         )
 
-    def _select_recording_dir(self) -> None:
-        folder = QFileDialog.getExistingDirectory(
-            self,
-            "Kies een map voor opnames",
-            self.recording_dir,
-        )
-        if folder:
-            self.recording_dir = folder
-            self.recording_dir_label.setText(f"Opname map: {self.recording_dir}")
-            self.status_label.setText(f"Opname map ingesteld: {self.recording_dir}")
-
-    def _apply_fps_settings(self) -> None:
-        self.fps_label.setText(f"Record FPS: {self.combo_record_fps.currentText()}")
-
-        if self.live_worker is not None and self.live_worker.isRunning():
-            if hasattr(self.live_worker, "set_record_fps"):
-                self.live_worker.set_record_fps(float(self.combo_record_fps.currentText()))
-
-    def _toggle_recording(self) -> None:
-        if self.live_worker is None or not self.live_worker.isRunning():
-            self.status_label.setText("Start eerst de live stream voordat je opneemt.")
-            return
-
-        if self.live_worker.recording:
-            path = self.live_worker.stop_recording()
-            if path:
-                self.status_label.setText(f"Opname opgeslagen: {path}")
-            self.btn_record.setText("START RECORDING")
-            return
-
-        if not os.path.isdir(self.recording_dir):
-            os.makedirs(self.recording_dir, exist_ok=True)
-
-        if hasattr(self.live_worker, "set_record_fps"):
-            self.live_worker.set_record_fps(float(self.combo_record_fps.currentText()))
-
-        path = self.live_worker.start_recording(self.recording_dir)
-        if path:
-            self.status_label.setText(f"Opname gestart: {path}")
-            self.btn_record.setText("STOP RECORDING")
-
     def go_back(self) -> None:
         # Stop de thread volledig voor we de UI verlaten
-        if self.live_worker is not None and self.live_worker.isRunning():
-            self.live_worker.stop_recording()
         self._stop_stream()
         if self.on_back:
             self.on_back()
@@ -509,6 +433,7 @@ class OrionLiveDashboard(QWidget):
                 self.slider_s_min.value(), self.slider_s_max.value(),
                 v_min=20, v_max=255,
             )
+            self.live_worker.set_engine(self.combo_engine.currentText())
 
     def _change_view_mode(self, index: int) -> None:
         self.feed_secondary.setVisible(index != 0)
