@@ -126,6 +126,15 @@ class GigECameraWorker(QThread):
         self.engine_name = "hsv"
         self.engine = self._build_engine(self.engine_name)
 
+        # Fisheye correction: applied before detection so the live feed is
+        # corrected immediately when the camera starts streaming.
+        self.fisheye_enabled = True
+        self.fisheye_k1 = -0.40
+        self.fisheye_k2 = 0.05
+        self._fisheye_map1 = None
+        self._fisheye_map2 = None
+        self._fisheye_size = None
+
         self._init_kalman()
         self.initialized              = False
         self.last_px: int | None      = None
@@ -222,6 +231,49 @@ class GigECameraWorker(QThread):
             v_min=self.v_min,
             v_max=self.v_max,
         )
+
+    def set_fisheye_correction(self, enabled: bool, k1: float | None = None, k2: float | None = None) -> None:
+        with QMutexLocker(self._mutex):
+            self.fisheye_enabled = bool(enabled)
+            if k1 is not None:
+                self.fisheye_k1 = float(k1)
+            if k2 is not None:
+                self.fisheye_k2 = float(k2)
+            self._fisheye_map1 = None
+            self._fisheye_map2 = None
+            self._fisheye_size = None
+
+    def _refresh_fisheye_maps(self, frame: np.ndarray) -> None:
+        h, w = frame.shape[:2]
+        if self._fisheye_size == (w, h) and self._fisheye_map1 is not None and self._fisheye_map2 is not None:
+            return
+
+        fx = fy = w * 0.9
+        cx, cy = w / 2.0, h / 2.0
+        camera_matrix = np.array(
+            [[fx, 0.0, cx],
+             [0.0, fy, cy],
+             [0.0, 0.0, 1.0]],
+            dtype=np.float64,
+        )
+        dist_coeffs = np.array([self.fisheye_k1, self.fisheye_k2, 0.0, 0.0, 0.0], dtype=np.float64)
+        new_camera_matrix, _ = cv2.getOptimalNewCameraMatrix(camera_matrix, dist_coeffs, (w, h), 1, (w, h))
+        self._fisheye_map1, self._fisheye_map2 = cv2.initUndistortRectifyMap(
+            camera_matrix,
+            dist_coeffs,
+            None,
+            new_camera_matrix,
+            (w, h),
+            cv2.CV_16SC2,
+        )
+        self._fisheye_size = (w, h)
+
+    def _apply_fisheye_correction(self, frame: np.ndarray) -> np.ndarray:
+        if not self.fisheye_enabled:
+            return frame
+
+        self._refresh_fisheye_maps(frame)
+        return cv2.remap(frame, self._fisheye_map1, self._fisheye_map2, cv2.INTER_LINEAR)
 
     def update_hsv(
         self,
@@ -398,6 +450,7 @@ class GigECameraWorker(QThread):
         bgr is gegarandeerd (H, W, 3) uint8 dankzij
         as_opencv_image() in de FrameHandler.
         """
+        bgr = self._apply_fisheye_correction(bgr)
         blurred = cv2.GaussianBlur(bgr, (5, 5), 0)
         hsv     = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV)
 

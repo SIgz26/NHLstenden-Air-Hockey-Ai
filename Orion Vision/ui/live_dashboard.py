@@ -4,7 +4,7 @@ import numpy as np
 from PyQt5.QtCore import Qt, pyqtSignal, QThread, QObject
 from PyQt5.QtGui import QPixmap
 from PyQt5.QtWidgets import (
-    QComboBox, QFrame, QGridLayout, QHBoxLayout,
+    QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout,
     QLabel, QPushButton, QSizePolicy, QSlider, QVBoxLayout, QWidget,
 )
 
@@ -130,6 +130,7 @@ class OrionLiveDashboard(QWidget):
             "Hybrid",
         ])
         self.combo_engine.setCurrentText("HSV Detection")
+        self.combo_engine.currentIndexChanged.connect(self._refresh_engine_settings_ui)
 
         self.btn_start = QPushButton("START LIVE STREAM")
         self.btn_start.clicked.connect(self.toggle_stream)
@@ -161,15 +162,26 @@ class OrionLiveDashboard(QWidget):
 
         layout.addWidget(self._divider())
 
-        # HSV tuning
-        layout.addWidget(self._section_label("HSV TUNING"))
-        layout.addLayout(self._build_color_picker_row())
+        # Fisheye correction
+        layout.addWidget(self._section_label("FISHEYE CORRECTION"))
+        self.fisheye_enabled = QCheckBox("Apply correction")
+        self.fisheye_enabled.setChecked(True)
+        self.fisheye_enabled.stateChanged.connect(self._sync_vision_settings)
+        layout.addWidget(self.fisheye_enabled)
 
-        self.slider_h_min, self.lbl_h_min = self._add_slider("Hue Min:", 0, 179,  35, layout)
-        self.slider_h_max, self.lbl_h_max = self._add_slider("Hue Max:", 0, 179,  95, layout)
-        self.slider_s_min, self.lbl_s_min = self._add_slider("Sat Min:", 0, 255,  20, layout)
-        self.slider_s_max, self.lbl_s_max = self._add_slider("Sat Max:", 0, 255, 255, layout)
+        self.fisheye_k1_slider = self._add_numeric_slider("k1", -1000, 500, -400, 1000, layout)
+        self.fisheye_k2_slider = self._add_numeric_slider("k2", -300, 300, 50, 1000, layout)
 
+        layout.addWidget(self._section_label("ENGINE SETTINGS"))
+        self.engine_settings_widget = QWidget()
+        self.engine_settings_layout = QVBoxLayout(self.engine_settings_widget)
+        self.engine_settings_layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.engine_settings_widget)
+
+        self.engine_setting_controls = {}
+        self.hsv_slider_map = {}
+        self._engine_setting_widgets = set()
+        self._refresh_engine_settings_ui()
         self._update_color_preview()
         layout.addStretch()
         return card
@@ -415,25 +427,201 @@ class OrionLiveDashboard(QWidget):
     # Interne helpers
     # ──────────────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _slider_is_live(slider) -> bool:
+        if slider is None:
+            return False
+        try:
+            slider.value()
+            return True
+        except RuntimeError:
+            return False
+
+    def _clear_layout(self, layout) -> None:
+        while layout.count():
+            item = layout.takeAt(0)
+            if item is None:
+                continue
+
+            widget = item.widget()
+            if widget is not None:
+                self._engine_setting_widgets.discard(widget)
+                if isinstance(widget, QSlider):
+                    try:
+                        widget.valueChanged.disconnect(self._sync_vision_settings)
+                    except TypeError:
+                        pass
+                elif hasattr(self, "color_preview") and widget is self.color_preview:
+                    self.color_preview = None
+                elif hasattr(self, "btn_pick_color") and widget is self.btn_pick_color:
+                    self.btn_pick_color = None
+                widget.deleteLater()
+                continue
+
+            child_layout = item.layout()
+            if child_layout is not None:
+                self._clear_layout(child_layout)
+                child_layout.deleteLater()
+
+    def _safe_read_slider(self, slider, default=0):
+        if not self._slider_is_live(slider):
+            return default
+        try:
+            return int(slider.value())
+        except RuntimeError:
+            return default
+
+    def _safe_set_preview_color(self, r, g, b) -> None:
+        preview = getattr(self, "color_preview", None)
+        if preview is None:
+            return
+        try:
+            preview.setStyleSheet(
+                f"background-color: rgb({r},{g},{b});"
+                " border: 1px solid #503422; border-radius: 3px;"
+            )
+        except RuntimeError:
+            self.color_preview = None
+
     def _update_color_preview(self) -> None:
-        avg_h = (self.slider_h_min.value() + self.slider_h_max.value()) // 2
-        avg_s = (self.slider_s_min.value() + self.slider_s_max.value()) // 2
+        h_min = getattr(self, "slider_h_min", None)
+        h_max = getattr(self, "slider_h_max", None)
+        s_min = getattr(self, "slider_s_min", None)
+        s_max = getattr(self, "slider_s_max", None)
+
+        if (
+            self._slider_is_live(h_min)
+            and self._slider_is_live(h_max)
+            and self._slider_is_live(s_min)
+            and self._slider_is_live(s_max)
+        ):
+            avg_h = (self._safe_read_slider(h_min) + self._safe_read_slider(h_max)) // 2
+            avg_s = (self._safe_read_slider(s_min) + self._safe_read_slider(s_max)) // 2
+        else:
+            avg_h = 35
+            avg_s = 120
+
         hsv_px = np.uint8([[[avg_h, avg_s, 200]]])
         r, g, b = cv2.cvtColor(hsv_px, cv2.COLOR_HSV2RGB)[0, 0]
-        self.color_preview.setStyleSheet(
-            f"background-color: rgb({r},{g},{b});"
-            " border: 1px solid #503422; border-radius: 3px;"
-        )
+        self._safe_set_preview_color(int(r), int(g), int(b))
+
+    def _engine_name_to_class(self, name: str):
+        mapping = {
+            "HSV Detection": "core.engines.hsv_engine.HsvEngine",
+            "Hough Circle": "core.engines.hough_circle_engine.HoughCircleEngine",
+            "Background Subtraction": "core.engines.bg_subtraction_engine.BackgroundSubtractionEngine",
+            "Circle Contour": "core.engines.circle_contour_engine.CircleContourEngine",
+            "Hybrid": "core.engines.hybrid_engine.HybridEngine",
+        }
+        module_name, class_name = mapping.get(name, mapping["HSV Detection"]).rsplit(".", 1)
+        module = __import__(module_name, fromlist=[class_name])
+        return getattr(module, class_name)
+
+    def _current_engine_instance(self):
+        if self.live_worker and self.live_worker.engine is not None:
+            return self.live_worker.engine
+        return self._engine_name_to_class(self.combo_engine.currentText())()
+
+    def _refresh_engine_settings_ui(self) -> None:
+        if hasattr(self, "engine_settings_layout"):
+            self._clear_layout(self.engine_settings_layout)
+
+        for attr in (
+            "slider_h_min", "slider_h_max", "slider_s_min", "slider_s_max",
+            "lbl_h_min", "lbl_h_max", "lbl_s_min", "lbl_s_max",
+        ):
+            if hasattr(self, attr):
+                setattr(self, attr, None)
+
+        self.engine_setting_controls.clear()
+        self.hsv_slider_map.clear()
+
+        engine = self._current_engine_instance()
+        schema = getattr(engine, "parameter_schema", ())
+
+        if self.combo_engine.currentText() == "HSV Detection":
+            self.engine_settings_layout.addLayout(self._build_color_picker_row())
+            self.slider_h_min, self.lbl_h_min = self._add_slider("Hue Min:", 0, 179, 35, self.engine_settings_layout)
+            self.slider_h_max, self.lbl_h_max = self._add_slider("Hue Max:", 0, 179, 95, self.engine_settings_layout)
+            self.slider_s_min, self.lbl_s_min = self._add_slider("Sat Min:", 0, 255, 20, self.engine_settings_layout)
+            self.slider_s_max, self.lbl_s_max = self._add_slider("Sat Max:", 0, 255, 255, self.engine_settings_layout)
+            self.hsv_slider_map = {
+                "h_min": self.slider_h_min,
+                "h_max": self.slider_h_max,
+                "s_min": self.slider_s_min,
+                "s_max": self.slider_s_max,
+            }
+
+        for param in schema:
+            name = param["name"]
+            if self.combo_engine.currentText() == "HSV Detection" and name in self.hsv_slider_map:
+                continue
+
+            label_text = param["label"]
+            min_v = int(param.get("min", 0))
+            max_v = int(param.get("max", 255))
+            default_v = int(param.get("default", min_v))
+            current_value = getattr(engine, name, default_v)
+
+            row = QHBoxLayout()
+            lbl_title = QLabel(label_text)
+            lbl_value = QLabel(str(current_value))
+            lbl_value.setStyleSheet("color: #b86230; font-weight: bold;")
+
+            slider = QSlider(Qt.Horizontal)
+            slider.setRange(min_v, max_v)
+            slider.setValue(int(current_value))
+            slider.valueChanged.connect(lambda value, label=lbl_value: label.setText(str(value)))
+            slider.valueChanged.connect(self._sync_vision_settings)
+
+            row.addWidget(lbl_title)
+            row.addWidget(slider)
+            row.addWidget(lbl_value)
+            self.engine_settings_layout.addLayout(row)
+            self.engine_setting_controls[name] = slider
+            self._engine_setting_widgets.add(slider)
 
     def _sync_vision_settings(self) -> None:
         self._update_color_preview()
+
+        engine_params = {}
+        for name, slider in self.engine_setting_controls.items():
+            if not self._slider_is_live(slider):
+                continue
+            engine_params[name] = int(slider.value())
+
+        if self.live_worker and self.live_worker.engine is not None:
+            self.live_worker.engine.update_settings(**engine_params)
+
         if self.live_worker and self.live_worker.isRunning():
-            self.live_worker.update_hsv(
-                self.slider_h_min.value(), self.slider_h_max.value(),
-                self.slider_s_min.value(), self.slider_s_max.value(),
-                v_min=20, v_max=255,
+            if hasattr(self, "fisheye_k1_slider") and self._slider_is_live(self.fisheye_k1_slider):
+                k1 = self.fisheye_k1_slider.value() / 1000.0
+            else:
+                k1 = -0.4
+            if hasattr(self, "fisheye_k2_slider") and self._slider_is_live(self.fisheye_k2_slider):
+                k2 = self.fisheye_k2_slider.value() / 1000.0
+            else:
+                k2 = 0.05
+            self.live_worker.set_fisheye_correction(
+                getattr(self, "fisheye_enabled", None).isChecked() if hasattr(self, "fisheye_enabled") else False,
+                k1,
+                k2,
             )
+            if self.combo_engine.currentText() == "HSV Detection":
+                if (
+                    self._slider_is_live(getattr(self, "slider_h_min", None))
+                    and self._slider_is_live(getattr(self, "slider_h_max", None))
+                    and self._slider_is_live(getattr(self, "slider_s_min", None))
+                    and self._slider_is_live(getattr(self, "slider_s_max", None))
+                ):
+                    self.live_worker.update_hsv(
+                        self.slider_h_min.value(), self.slider_h_max.value(),
+                        self.slider_s_min.value(), self.slider_s_max.value(),
+                        v_min=20, v_max=255,
+                    )
             self.live_worker.set_engine(self.combo_engine.currentText())
+            if self.live_worker.engine is not None:
+                self.live_worker.engine.update_settings(**engine_params)
 
     def _change_view_mode(self, index: int) -> None:
         self.feed_secondary.setVisible(index != 0)
@@ -470,6 +658,35 @@ class OrionLiveDashboard(QWidget):
         line.setFrameShape(QFrame.HLine)
         line.setStyleSheet("color: #503422;")
         return line
+
+    def _add_numeric_slider(
+        self,
+        label_text: str,
+        min_v: int,
+        max_v: int,
+        default_v: int,
+        divider: int,
+        parent_layout: QVBoxLayout,
+    ) -> QSlider:
+        row = QHBoxLayout()
+
+        lbl_title = QLabel(f"{label_text}:")
+        lbl_val = QLabel(f"{default_v / divider:.3f}")
+        lbl_val.setStyleSheet("color: #b86230; font-weight: bold;")
+
+        slider = QSlider(Qt.Horizontal)
+        slider.setRange(min_v, max_v)
+        slider.setValue(default_v)
+        slider.valueChanged.connect(
+            lambda v, l=lbl_val: l.setText(f"{v / divider:.3f}")
+        )
+        slider.valueChanged.connect(self._sync_vision_settings)
+
+        row.addWidget(lbl_title)
+        row.addWidget(slider)
+        row.addWidget(lbl_val)
+        parent_layout.addLayout(row)
+        return slider
 
     def _add_slider(
         self,
