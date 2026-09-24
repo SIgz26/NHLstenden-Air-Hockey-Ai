@@ -7,6 +7,12 @@ import numpy as np
 from PyQt5.QtCore import QThread, pyqtSignal, QMutex, QMutexLocker, QReadWriteLock
 from PyQt5.QtGui import QImage, QPixmap
 
+from core.engines.hsv_engine import HsvEngine
+from core.engines.hough_circle_engine import HoughCircleEngine
+from core.engines.bg_subtraction_engine import BackgroundSubtractionEngine
+from core.engines.circle_contour_engine import CircleContourEngine
+from core.engines.hybrid_engine import HybridEngine
+
 
 class LiveCameraWorker(QThread):
     """
@@ -56,6 +62,9 @@ class LiveCameraWorker(QThread):
         self.v_min, self.v_max = 40, 255
         self.min_area = 40
         self.max_area = 2500
+
+        self.engine_name = "hsv"
+        self.engine = self._build_engine(self.engine_name)
 
         self._init_kalman()
         self.initialized = False
@@ -129,6 +138,49 @@ class LiveCameraWorker(QThread):
             cv2.setLogLevel(old_level)
 
         return available
+
+    def _normalize_engine_name(self, engine_name: str) -> str:
+        raw = str(engine_name).strip().lower()
+        normalized = raw.replace("-", "_").replace(" ", "_")
+        aliases = {
+            "hsv": "hsv",
+            "hsv_detection": "hsv",
+            "hough_circle": "hough_circle",
+            "hough_circle_detection": "hough_circle",
+            "hough": "hough_circle",
+            "background_subtraction": "bg_subtraction",
+            "background_subtraction_detection": "bg_subtraction",
+            "circle_contour": "circle_contour",
+            "circle_contour_detection": "circle_contour",
+            "hybrid": "hybrid",
+            "hybrid_detection": "hybrid",
+        }
+        return aliases.get(normalized, normalized)
+
+    def _build_engine(self, engine_name: str):
+        normalized = self._normalize_engine_name(engine_name)
+        mapping = {
+            "hsv": HsvEngine,
+            "hough_circle": HoughCircleEngine,
+            "bg_subtraction": BackgroundSubtractionEngine,
+            "circle_contour": CircleContourEngine,
+            "hybrid": HybridEngine,
+        }
+        engine_cls = mapping.get(normalized, HsvEngine)
+        return engine_cls()
+
+    def set_engine(self, engine_name: str) -> None:
+        normalized = self._normalize_engine_name(engine_name)
+        self.engine_name = normalized
+        self.engine = self._build_engine(normalized)
+        self.engine.update_settings(
+            h_min=self.h_min,
+            h_max=self.h_max,
+            s_min=self.s_min,
+            s_max=self.s_max,
+            v_min=self.v_min,
+            v_max=self.v_max,
+        )
 
     def set_camera_index(self, index: int) -> None:
         with QMutexLocker(self._mutex):
@@ -253,7 +305,14 @@ class LiveCameraWorker(QThread):
 
             # --- Detection ---
             result = frame.copy()
-            self._detect_and_draw(mask, result)
+            if hasattr(self, "engine") and self.engine is not None:
+                try:
+                    result, mask = self.engine.process_frame(frame)
+                except Exception:
+                    result = frame.copy()
+                    self._detect_and_draw(mask, result)
+            else:
+                self._detect_and_draw(mask, result)
 
             if self.recording:
                 if self.record_writer is None:
@@ -289,9 +348,16 @@ class LiveCameraWorker(QThread):
 
             # --- Emit ---
             pixmap_result = self._mat_to_pixmap(result)
-            pixmap_mask = self._mat_to_pixmap(
-                cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
-            )
+            
+            # Veilige conversie voor het masker/secondary beeld naar BGR voor de QPixmap
+            if len(mask.shape) == 2:
+                mask_bgr = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+            elif mask.shape[2] == 1:
+                mask_bgr = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+            else:
+                mask_bgr = mask
+
+            pixmap_mask = self._mat_to_pixmap(mask_bgr)
             self.frame_processed.emit(pixmap_result, pixmap_mask)
             self.msleep(self.FRAME_SLEEP_MS)
 

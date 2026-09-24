@@ -1,7 +1,3 @@
-import os
-import time
-from datetime import datetime
-
 import numpy as np
 import cv2
 
@@ -9,6 +5,12 @@ from queue import Queue, Empty, Full
 
 from PyQt5.QtCore import QThread, pyqtSignal, QMutex, QMutexLocker, QReadWriteLock
 from PyQt5.QtGui import QImage, QPixmap
+
+from core.engines.hsv_engine import HsvEngine
+from core.engines.hough_circle_engine import HoughCircleEngine
+from core.engines.bg_subtraction_engine import BackgroundSubtractionEngine
+from core.engines.circle_contour_engine import CircleContourEngine
+from core.engines.hybrid_engine import HybridEngine
 
 try:
     import vmbpy
@@ -110,15 +112,6 @@ class GigECameraWorker(QThread):
         self.camera_id = camera_id
         self.running   = True
         self.paused    = False
-        self.recording = False
-        self.record_output_dir = None
-        self.record_path = None
-        self.record_writer = None
-        self.target_fps = 20.0
-        self.record_fps = 20.0
-        self._fps = 0.0
-        self._frame_counter = 0
-        self._fps_last_update = time.monotonic()
 
         self._hsv_frame_lock                       = QReadWriteLock()
         self._current_hsv_frame: np.ndarray | None = None
@@ -129,6 +122,9 @@ class GigECameraWorker(QThread):
         self.v_min, self.v_max = 40, 255
         self.min_area  = 40
         self.max_area  = 2500
+
+        self.engine_name = "hsv"
+        self.engine = self._build_engine(self.engine_name)
 
         self._init_kalman()
         self.initialized              = False
@@ -184,6 +180,49 @@ class GigECameraWorker(QThread):
             print(f"[GigE] Scan mislukt: {exc}")
         return result
 
+    def _normalize_engine_name(self, engine_name: str) -> str:
+        raw = str(engine_name).strip().lower()
+        normalized = raw.replace("-", "_").replace(" ", "_")
+        aliases = {
+            "hsv": "hsv",
+            "hsv_detection": "hsv",
+            "hough_circle": "hough_circle",
+            "hough_circle_detection": "hough_circle",
+            "hough": "hough_circle",
+            "background_subtraction": "bg_subtraction",
+            "background_subtraction_detection": "bg_subtraction",
+            "circle_contour": "circle_contour",
+            "circle_contour_detection": "circle_contour",
+            "hybrid": "hybrid",
+            "hybrid_detection": "hybrid",
+        }
+        return aliases.get(normalized, normalized)
+
+    def _build_engine(self, engine_name: str):
+        normalized = self._normalize_engine_name(engine_name)
+        mapping = {
+            "hsv": HsvEngine,
+            "hough_circle": HoughCircleEngine,
+            "bg_subtraction": BackgroundSubtractionEngine,
+            "circle_contour": CircleContourEngine,
+            "hybrid": HybridEngine,
+        }
+        engine_cls = mapping.get(normalized, HsvEngine)
+        return engine_cls()
+
+    def set_engine(self, engine_name: str) -> None:
+        normalized = self._normalize_engine_name(engine_name)
+        self.engine_name = normalized
+        self.engine = self._build_engine(normalized)
+        self.engine.update_settings(
+            h_min=self.h_min,
+            h_max=self.h_max,
+            s_min=self.s_min,
+            s_max=self.s_max,
+            v_min=self.v_min,
+            v_max=self.v_max,
+        )
+
     def update_hsv(
         self,
         h_min: int, h_max: int,
@@ -204,42 +243,8 @@ class GigECameraWorker(QThread):
             self.paused = not self.paused
             return self.paused
 
-    def set_target_fps(self, fps: float | int) -> None:
-        with QMutexLocker(self._mutex):
-            self.target_fps = max(1.0, min(float(fps), 60.0))
-
-    def set_record_fps(self, fps: float | int) -> None:
-        with QMutexLocker(self._mutex):
-            self.record_fps = max(1.0, min(float(fps), 60.0))
-
-    def start_recording(self, output_dir: str) -> str | None:
-        if not output_dir:
-            return None
-
-        os.makedirs(output_dir, exist_ok=True)
-        self.record_output_dir = output_dir
-        self.recording = True
-        self.record_path = None
-        self.record_writer = None
-        return output_dir
-
-    def stop_recording(self) -> str | None:
-        if self.record_writer is not None:
-            self.record_writer.release()
-            self.record_writer = None
-
-        path = self.record_path
-        self.recording = False
-        self.record_path = None
-        self.record_output_dir = None
-
-        if path:
-            self.status_signal.emit(f"Opname opgeslagen: {path}")
-        return path
-
     def stop(self) -> None:
         self.running = False
-        self.stop_recording()
 
     # ── Hoofd-loop ─────────────────────────────────────────────────────
 
@@ -377,15 +382,6 @@ class GigECameraWorker(QThread):
                 except Empty:
                     continue
 
-                self._frame_counter += 1
-                now = time.monotonic()
-                if now - self._fps_last_update >= 0.5:
-                    elapsed = max(now - self._fps_last_update, 0.001)
-                    self._fps = self._frame_counter / elapsed
-                    self._frame_counter = 0
-                    self._fps_last_update = now
-                    self.status_signal.emit(f"GigE FPS: {self._fps:.1f}")
-
                 if handler.frame_count % 30 == 0:
                     self.status_signal.emit(
                         f"GigE Live | OK: {handler.frame_count} | Error: {handler.incomplete}"
@@ -419,35 +415,17 @@ class GigECameraWorker(QThread):
         mask   = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
 
         result = bgr.copy()
-        self._detect_and_draw(mask, result)
-
-        if self.recording:
-            if self.record_writer is None:
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                self.record_path = os.path.join(
-                    self.record_output_dir or os.getcwd(),
-                    f"orion_live_{timestamp}.mp4",
-                )
-                self.record_writer = cv2.VideoWriter(
-                    self.record_path,
-                    cv2.VideoWriter_fourcc(*"mp4v"),
-                    self.record_fps,
-                    (bgr.shape[1], bgr.shape[0]),
-                )
-                if not self.record_writer.isOpened():
-                    self.status_signal.emit(
-                        "Fout: opname kon niet worden gestart. Controleer de map."
-                    )
-                    self.record_writer = None
-                    self.record_path = None
-                    self.recording = False
-
-            if self.record_writer is not None:
-                self.record_writer.write(bgr)
+        if hasattr(self, "engine") and self.engine is not None:
+            try:
+                result, mask = self.engine.process_frame(bgr)
+            except Exception:
+                self._detect_and_draw(mask, result)
+        else:
+            self._detect_and_draw(mask, result)
 
         self.frame_processed.emit(
             self._mat_to_pixmap(result),
-            self._mat_to_pixmap(cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)),
+            self._mat_to_pixmap(cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR) if mask.ndim == 2 else mask),
         )
 
     # ── Detectie ───────────────────────────────────────────────────────
