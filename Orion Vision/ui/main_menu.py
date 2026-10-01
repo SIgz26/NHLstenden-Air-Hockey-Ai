@@ -1,10 +1,3 @@
-#
-#versie: BETA 1.1.1
-#door: Timo Zylstra
-#datum: 24-09-2026
-#nieuw: 
-#
-
 
 from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame
 from PyQt5.QtGui import QFont
@@ -124,7 +117,7 @@ class OrionMainMenu(QWidget):
         ai_body.setWordWrap(True)
 
         btn_launch_ai = QPushButton("LAUNCH BUILDER")
-        btn_launch_ai.setEnabled(False)
+        btn_launch_ai.clicked.connect(lambda: self.on_select_module("ai_trainer"))
 
         ai_layout.addWidget(ai_title)
         ai_layout.addWidget(ai_body)
