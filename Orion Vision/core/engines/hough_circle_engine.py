@@ -14,8 +14,8 @@ class HoughCircleEngine(BaseEngine):
 
     name = "hough_circles"
     parameter_schema = (
-        {"name": "min_radius", "label": "Min Radius (px)", "type": "int", "min": int(5), "max": int(100), "default": int(15)},
-        {"name": "max_radius", "label": "Max Radius (px)", "type": "int", "min": int(10), "max": int(150), "default": int(50)},
+        {"name": "min_radius", "label": "Min Radius (px)", "type": "int", "min": int(1), "max": int(100), "default": int(15)},
+        {"name": "max_radius", "label": "Max Radius (px)", "type": "int", "min": int(4), "max": int(150), "default": int(50)},
         {"name": "param2", "label": "Sensitivity (Acc Threshold)", "type": "int", "min": int(5), "max": int(100), "default": int(30)},
         {"name": "min_dist", "label": "Min Distance", "type": "int", "min": int(10), "max": int(200), "default": int(50)},
     )

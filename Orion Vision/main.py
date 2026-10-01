@@ -1,12 +1,35 @@
 #
-#versie: BETA 1.1.1
+#versie: BETA 1.2.0
 #door: Timo Zylstra
-#datum: 24-09-2026
-#nieuw: engine selecter en settings menu toegevoegd. hierbij ook de functie gekregen om de fisheye correctie aan, uit te zetten en de settings er van aan te passen.
+#datum: 01-10-2026
+#nieuw: Handmatige 4-punts tafelkalibratie, perspectiefcorrectie en zichtbare kalibratie-overlay.
+#nieuw: ArUco-tracking voor robot en tegenstander, plus 2D Digital Twin met SAC-acties en puckbaanvoorspelling.
+#nieuw: SAC-trainer met Gymnasium airhockeyfysica, modelopslag en CUDA-training (met CPU-fallback).
 #
 import os
 import sys
 import ctypes
+
+try:
+    import torch
+    TORCH_IMPORT_ERROR = None
+except Exception as exc:
+    torch = None
+    TORCH_IMPORT_ERROR = exc
+    print(f"PyTorch unavailable; SAC inference disabled: {exc}", file=sys.stderr)
+
+from ai.sac_controller import check_sac_runtime, preload_sac_runtime
+
+if not preload_sac_runtime(
+    torch,
+    TORCH_IMPORT_ERROR,
+    torch_import_attempted=True,
+):
+    try:
+        check_sac_runtime()
+    except RuntimeError as exc:
+        print(f"SAC inference unavailable: {exc}", file=sys.stderr)
+
 from PyQt5.QtWidgets import QApplication
 
 from ui.main_window import OrionMainWindow

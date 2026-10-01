@@ -11,6 +11,9 @@ from core.engines.hough_circle_engine import HoughCircleEngine
 from core.engines.bg_subtraction_engine import BackgroundSubtractionEngine
 from core.engines.circle_contour_engine import CircleContourEngine
 from core.engines.hybrid_engine import HybridEngine
+from core.engines.aruco_tracker import ArUcoMalletTracker
+from core.sim_bridge import SimBridge
+from core.table_overlay import draw_table_overlay
 
 try:
     import vmbpy
@@ -125,6 +128,10 @@ class GigECameraWorker(QThread):
 
         self.engine_name = "hsv"
         self.engine = self._build_engine(self.engine_name)
+        self.sim_bridge = SimBridge()
+        self.aruco_tracker = ArUcoMalletTracker()
+        self.show_table_overlay = True
+        self._table_calibration_preview: tuple[tuple[float, float], ...] = ()
 
         # Fisheye correction: applied before detection so the live feed is
         # corrected immediately when the camera starts streaming.
@@ -242,6 +249,18 @@ class GigECameraWorker(QThread):
             self._fisheye_map1 = None
             self._fisheye_map2 = None
             self._fisheye_size = None
+
+    def set_show_table_overlay(self, enabled: bool) -> None:
+        """Enable or disable calibrated table corners on the displayed frame."""
+        self.show_table_overlay = bool(enabled)
+
+    set_table_overlay_enabled = set_show_table_overlay
+
+    def set_table_calibration_preview(
+        self, corners: tuple[tuple[float, float], ...]
+    ) -> None:
+        """Update partial manual corner points displayed over the camera feed."""
+        self._table_calibration_preview = tuple(corners[:4])
 
     def _refresh_fisheye_maps(self, frame: np.ndarray) -> None:
         h, w = frame.shape[:2]
@@ -451,6 +470,7 @@ class GigECameraWorker(QThread):
         as_opencv_image() in de FrameHandler.
         """
         bgr = self._apply_fisheye_correction(bgr)
+        robot_position, opponent_position = self.aruco_tracker.detect_mallets(bgr)
         blurred = cv2.GaussianBlur(bgr, (5, 5), 0)
         hsv     = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV)
 
@@ -475,6 +495,23 @@ class GigECameraWorker(QThread):
                 self._detect_and_draw(mask, result)
         else:
             self._detect_and_draw(mask, result)
+
+        if self.engine is not None:
+            self.sim_bridge.update_from_engine(
+                self.engine.last_result,
+                frame_width=bgr.shape[1],
+                frame_height=bgr.shape[0],
+                frame_rate=float(getattr(self.engine, "ESTIMATED_FPS", 30.0)),
+            )
+        self.sim_bridge.update_telemetry(
+            robot_position=robot_position,
+            opponent_position=opponent_position,
+        )
+        draw_table_overlay(
+            result,
+            self._table_calibration_preview or self.sim_bridge.get_table_corners(),
+            enabled=self.show_table_overlay or bool(self._table_calibration_preview),
+        )
 
         self.frame_processed.emit(
             self._mat_to_pixmap(result),
