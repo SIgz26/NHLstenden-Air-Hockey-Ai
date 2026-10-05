@@ -6,6 +6,8 @@ import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
 
+from ai.opponents.attacker import AttackerOpponent, ComplexOpponent
+
 
 class AirHockeyGymEnv(gym.Env[np.ndarray, np.ndarray]):
     """Air-hockey physics with an 8D normalized SimBridge observation.
@@ -52,6 +54,9 @@ class AirHockeyGymEnv(gym.Env[np.ndarray, np.ndarray]):
         self._steps = 0
         self._episode_return = 0.0
         self._observation = np.zeros(8, dtype=np.float32)
+
+        # Maak een instantie aan van AttackerOpponent
+        self.opponent = ComplexOpponent()
 
     @property
     def observation(self) -> np.ndarray:
@@ -102,18 +107,37 @@ class AirHockeyGymEnv(gym.Env[np.ndarray, np.ndarray]):
         if not np.isfinite(target_velocity).all():
             raise ValueError("action must contain finite values")
         target_velocity = np.clip(target_velocity, -1.0, 1.0) * self.MAX_MALLET_SPEED_MPS
+        
         self._steps += 1
         previous_puck_x = float(self._puck_position[0])
-
         half_length = self.FIELD_LENGTH_M / 2.0
+        half_width = self.FIELD_WIDTH_M / 2.0
+        y_limit_mallet = half_width - self.MALLET_RADIUS_M
+
+        # 1. Verplaats mallets
         self._advance_mallet(
             self._robot_position,
             self._robot_velocity,
             target_velocity,
             (-half_length + self.MALLET_RADIUS_M, -self.MALLET_RADIUS_M),
         )
-        self._advance_opponent()
 
+        desired_opponent_vel = self.opponent.get_action(
+            self._puck_position,
+            self._puck_velocity,
+            self._opponent_position,
+            self.FIELD_LENGTH_M,
+            self.FIELD_WIDTH_M,
+            self.MALLET_RADIUS_M,
+        )
+        self._advance_mallet(
+            self._opponent_position,
+            self._opponent_velocity,
+            desired_opponent_vel,
+            (self.MALLET_RADIUS_M, half_length - self.MALLET_RADIUS_M),
+        )
+
+        # 2. Physics update
         self._puck_position += self._puck_velocity * self.DT
         self._resolve_puck_walls()
         self._puck_velocity *= 1.0 - self.PUCK_AIR_FRICTION * self.DT
@@ -126,6 +150,7 @@ class AirHockeyGymEnv(gym.Env[np.ndarray, np.ndarray]):
         )
         self._resolve_puck_walls()
 
+        # 3. Goal detectie
         goal_opening_half = self.GOAL_WIDTH_M / 2.0 - self.PUCK_RADIUS_M
         scored_right = (
             self._puck_position[0] >= half_length - self.PUCK_RADIUS_M
@@ -136,23 +161,72 @@ class AirHockeyGymEnv(gym.Env[np.ndarray, np.ndarray]):
             and abs(float(self._puck_position[1])) <= goal_opening_half
         )
 
-        reward = -0.002 + 0.02 * (float(self._puck_position[0]) - previous_puck_x)
+        # ----------------------------------------------------------------------
+        # REWARD LOGICA (Sessie 03 Verbeterd)
+        # ----------------------------------------------------------------------
+        reward = -0.005  # Basis time penalty om actie te stimuleren
+
+        # --- 1. IMPACT REWARD (vervangt simpele contact reward) ---
         if robot_contact:
-            reward += 0.25
+            # Bereken relatieve snelheid op het moment van impact
+            relative_vel = np.linalg.norm(self._robot_velocity - self._puck_velocity)
+            # Beloon alleen echte slagen (voorkomt 375 schoten/min 'contact farming')
+            if relative_vel > 0.5: 
+                reward += 0.5 * relative_vel 
+            else:
+                reward += 0.05 
+
         if opponent_contact:
-            reward -= 0.08
-        if self._puck_position[0] < 0.0:
-            lateral_error = abs(float(self._robot_position[1] - self._puck_position[1]))
-            reward += 0.015 * max(0.0, 1.0 - lateral_error / (self.FIELD_WIDTH_M / 2.0))
+            reward -= 0.1
+
+        # --- 2. ANTI-CAMPING & WALL PENALTY ---
+        # Straf voor het 'plakken' aan de achterwand (x_min ≈ -0.927)
+        if self._robot_position[0] < (-half_length + self.MALLET_RADIUS_M + 0.05):
+            puck_dist_x = abs(self._puck_position[0] - self._robot_position[0])
+            if puck_dist_x > 0.4:
+                reward -= 0.01  # Straf voor te passief wachten in de hoek
+        
+        # Straf voor te dicht bij de zijmuren (Wall Proximity Penalty uit logboek)
+        dist_to_wall = half_width - abs(self._robot_position[1])
+        if dist_to_wall < 0.05:
+            proximity = (0.05 - dist_to_wall) / 0.05
+            reward -= 0.05 * proximity
+
+        # --- 3. DYNAMISCHE CLEARANCE & PROGRESSIE ---
+        # Beloon het verplaatsen van de puck van eigen naar vijandelijke helft
+        if previous_puck_x < 0 and self._puck_position[0] >= 0:
+            reward += 1.0 
+        
+        # Progressie reward (alleen als de puck niet al bij de tegenstander ligt)
+        if self._puck_position[0] < 0.5:
+            reward += 0.02 * (self._puck_position[0] - previous_puck_x)
+
+        # --- 4. DEFENSIVE ALIGNMENT BONUS ---
+        if self._puck_position[0] < 0.0:  # Alleen als puck op onze helft is
+            # Bonus voor het staan tussen de puck en het doel
+            lateral_error = abs(self._robot_position[1] - self._puck_position[1])
+            reward += 0.03 * max(0.0, 1.0 - lateral_error / half_width)
+            
+            # Extra bonus voor positie voor het eigen doel (Defensive zone)
+            if self._robot_position[0] < -half_length / 2.0:
+                if abs(self._robot_position[1]) < self.GOAL_WIDTH_M / 2.0:
+                    reward += 0.02
+
+        # --- 5. SPARSE GOAL REWARDS ---
         if scored_right:
-            reward += 10.0
+            reward += 15.0
         elif scored_left:
-            reward -= 10.0
+            reward -= 15.0
+
+        # ----------------------------------------------------------------------
+        # EINDE REWARD LOGICA
+        # ----------------------------------------------------------------------
 
         terminated = bool(scored_right or scored_left)
         truncated = self._steps >= self.max_episode_steps
         self._episode_return += reward
         self._observation = self._make_observation()
+        
         info = {
             "goal_scored": bool(scored_right or scored_left),
             "scored_for": "robot" if scored_right else "opponent" if scored_left else None,
@@ -160,6 +234,7 @@ class AirHockeyGymEnv(gym.Env[np.ndarray, np.ndarray]):
             "opponent_contact": opponent_contact,
             "episode_return": self._episode_return,
         }
+        
         return self._observation.copy(), float(reward), terminated, truncated, info
 
     def _advance_mallet(
@@ -186,21 +261,6 @@ class AirHockeyGymEnv(gym.Env[np.ndarray, np.ndarray]):
         if position[1] < -y_limit or position[1] > y_limit:
             position[1] = float(np.clip(position[1], -y_limit, y_limit))
             velocity[1] = 0.0
-
-    def _advance_opponent(self) -> None:
-        """Simple defender tracks puck Y with a bounded motor response."""
-        half_length = self.FIELD_LENGTH_M / 2.0
-        target = np.asarray(
-            [half_length * 0.72, float(np.clip(self._puck_position[1], -0.28, 0.28))],
-            dtype=np.float64,
-        )
-        desired_velocity = np.clip((target - self._opponent_position) / 0.25, -1.5, 1.5)
-        self._advance_mallet(
-            self._opponent_position,
-            self._opponent_velocity,
-            desired_velocity,
-            (self.MALLET_RADIUS_M, half_length - self.MALLET_RADIUS_M),
-        )
 
     def _resolve_puck_walls(self) -> None:
         """Reflect the puck center at radius-adjusted wall positions."""
