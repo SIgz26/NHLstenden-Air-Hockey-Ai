@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
+import webbrowser
 from pathlib import Path
+from urllib.error import URLError
+from urllib.request import urlopen
 
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
+    QComboBox,
     QDoubleSpinBox,
     QFileDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QProgressBar,
     QPushButton,
     QSpinBox,
@@ -20,6 +25,8 @@ from PyQt5.QtWidgets import (
 
 from ai.trainer_worker import SACTrainerWorker
 from ui.widgets.digital_twin_widget import DigitalTwinWidget
+
+TENSORBOARD_URL = "http://localhost:6006"
 
 
 class OrionTrainerDashboard(QWidget):
@@ -87,6 +94,12 @@ class OrionTrainerDashboard(QWidget):
         controls_layout.addWidget(QLabel("Replay Buffer Size"))
         controls_layout.addWidget(self.buffer_size_input)
 
+        self.reward_mode_selector = QComboBox()
+        self.reward_mode_selector.addItems(["aggressive", "balanced", "defensive"])
+        self.reward_mode_selector.setCurrentText("aggressive")
+        controls_layout.addWidget(QLabel("Reward Variant"))
+        controls_layout.addWidget(self.reward_mode_selector)
+
         self.output_path_label = QLabel("models/trained_sac_model.zip")
         self.output_path_label.setWordWrap(True)
         self.btn_choose_output = QPushButton("CHOOSE MODEL OUTPUT")
@@ -103,9 +116,12 @@ class OrionTrainerDashboard(QWidget):
         self.btn_stop_save = QPushButton("STOP & SAVE MODEL")
         self.btn_stop_save.setEnabled(False)
         self.btn_stop_save.clicked.connect(self.stop_and_save)
+        self.btn_tensorboard = QPushButton("Open TensorBoard")
+        self.btn_tensorboard.clicked.connect(self.open_tensorboard)
         controls_layout.addWidget(self.btn_start)
         controls_layout.addWidget(self.btn_pause)
         controls_layout.addWidget(self.btn_stop_save)
+        controls_layout.addWidget(self.btn_tensorboard)
         controls_layout.addStretch()
         columns.addWidget(controls, stretch=1)
 
@@ -174,6 +190,7 @@ class OrionTrainerDashboard(QWidget):
                 learning_rate=self.learning_rate_input.value(),
                 buffer_size=self.buffer_size_input.value(),
                 output_path=self.output_path_label.text(),
+                reward_mode=self.reward_mode_selector.currentText(),
                 parent=self,
             )
         except ValueError as exc:
@@ -209,6 +226,28 @@ class OrionTrainerDashboard(QWidget):
         if self.trainer_worker is not None:
             self.status_label.setText("Stopping; saving model after current training step...")
             self.trainer_worker.stop_training()
+
+    def open_tensorboard(self) -> None:
+        """Open the local TensorBoard UI when its server is reachable."""
+        try:
+            with urlopen(TENSORBOARD_URL, timeout=1):
+                pass
+        except (OSError, URLError) as exc:
+            message = (
+                "TensorBoard is not running at localhost:6006. Start it with: "
+                "python -m tensorboard.main --logdir .\\sac_air_hockey_tensorboard"
+            )
+            self.status_label.setText(message)
+            QMessageBox.warning(self, "TensorBoard unavailable", f"{message}\n\n{exc}")
+            return
+
+        try:
+            if not webbrowser.open(TENSORBOARD_URL):
+                raise webbrowser.Error("No browser accepted the TensorBoard URL")
+        except (webbrowser.Error, OSError) as exc:
+            message = f"Could not open TensorBoard in a browser: {exc}"
+            self.status_label.setText(message)
+            QMessageBox.warning(self, "Could not open TensorBoard", message)
 
     def _set_training_controls(self, running: bool) -> None:
         self.btn_start.setEnabled(not running)
