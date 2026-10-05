@@ -3,7 +3,9 @@
 import os
 import subprocess
 import sys
+from io import BytesIO
 from pathlib import Path
+from urllib.error import URLError
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -11,7 +13,8 @@ import numpy as np
 from PyQt5.QtWidgets import QApplication, QPushButton
 
 from ai.air_hockey_env import AirHockeyGymEnv
-from ai.trainer_worker import SACTrainerWorker
+from ai.trainer_worker import AirHockeyMetricsCallback, SACTrainerWorker, linear_schedule
+from ui.ai_trainer_dashboard import OrionTrainerDashboard
 from ui.main_menu import OrionMainMenu
 
 
@@ -33,6 +36,125 @@ def test_air_hockey_env_observation_action_and_step_contract():
     assert isinstance(truncated, bool)
     assert "goal_scored" in info
     env.close()
+
+
+def test_reward_mode_is_configurable_and_kept_on_environment():
+    env = AirHockeyGymEnv(seed=7, max_episode_steps=10, reward_mode="balanced")
+    assert env.reward_mode == "balanced"
+    env.reset(seed=11)
+    _, reward, _, _, _ = env.step(np.asarray([0.2, -0.3], dtype=np.float32))
+    assert np.isfinite(reward)
+    env.close()
+
+    worker = SACTrainerWorker(total_timesteps=10, reward_mode="defensive")
+    assert worker.reward_mode == "defensive"
+
+
+def test_learning_rate_schedule_decays_from_initial_to_final_value():
+    schedule = linear_schedule(3e-4)
+
+    assert np.isclose(schedule(1.0), 3e-4)
+    assert np.isclose(schedule(0.5), (3e-4 + 1e-5) / 2.0)
+    assert np.isclose(schedule(0.0), 1e-5)
+
+
+def test_air_hockey_metrics_callback_records_behavior_score_and_episode_metrics():
+    class FakeEnv:
+        num_envs = 1
+
+    class FakeLogger:
+        def __init__(self):
+            self.values = {}
+
+        def record(self, key, value):
+            self.values[key] = value
+
+    class FakeModel:
+        num_timesteps = 1
+        logger = FakeLogger()
+
+        def get_env(self):
+            return FakeEnv()
+
+    model = FakeModel()
+    callback = AirHockeyMetricsCallback()
+    callback.init_callback(model)
+    callback.on_training_start(locals_={}, globals_={})
+    terminal_observation = np.zeros(8, dtype=np.float32)
+    terminal_observation[6] = -0.72
+    callback.update_locals(
+        {
+            "rewards": np.asarray([1.5]),
+            "dones": np.asarray([True]),
+            "new_obs": terminal_observation.reshape(1, -1),
+            "infos": [
+                {
+                    "robot_contact": True,
+                    "scored_for": "robot",
+                    "terminal_observation": terminal_observation,
+                    "episode": {"r": 1.5, "l": 1},
+                }
+            ],
+        }
+    )
+
+    assert callback.on_step()
+    assert model.logger.values["1_Gedrag/Muurovertredingen"] == 0
+    assert model.logger.values["1_Gedrag/Verdediging_Dekking"] == 100.0
+    assert model.logger.values["1_Gedrag/Puck_Balcontact"] == 1
+    assert model.logger.values["2_Prestaties/Doelpunten_Voor"] == 1
+    assert model.logger.values["2_Prestaties/Doelpunten_Tegen"] == 0
+    assert model.logger.values["0_Overzicht/Gemiddelde_Beloning"] == 1.5
+    assert model.logger.values["0_Overzicht/Gemiddelde_Episode_Duur_Stappen"] == 1.0
+
+
+def test_dashboard_exposes_reward_selector():
+    app = QApplication.instance() or QApplication([])
+    dashboard = OrionTrainerDashboard()
+    assert hasattr(dashboard, "reward_mode_selector")
+    assert dashboard.reward_mode_selector.currentText() == "aggressive"
+    dashboard.close()
+    app.processEvents()
+
+
+def test_dashboard_opens_tensorboard_when_server_is_available(monkeypatch):
+    app = QApplication.instance() or QApplication([])
+    opened_urls = []
+    monkeypatch.setattr("ui.ai_trainer_dashboard.urlopen", lambda *args, **kwargs: BytesIO())
+    monkeypatch.setattr(
+        "ui.ai_trainer_dashboard.webbrowser.open",
+        lambda url: opened_urls.append(url) or True,
+    )
+    dashboard = OrionTrainerDashboard()
+
+    dashboard.btn_tensorboard.click()
+
+    assert opened_urls == ["http://localhost:6006"]
+    dashboard.close()
+    app.processEvents()
+
+
+def test_dashboard_reports_when_tensorboard_server_is_unavailable(monkeypatch):
+    app = QApplication.instance() or QApplication([])
+    opened_urls = []
+
+    def unavailable(*args, **kwargs):
+        raise URLError("connection refused")
+
+    monkeypatch.setattr("ui.ai_trainer_dashboard.urlopen", unavailable)
+    monkeypatch.setattr(
+        "ui.ai_trainer_dashboard.webbrowser.open",
+        lambda url: opened_urls.append(url) or True,
+    )
+    monkeypatch.setattr("ui.ai_trainer_dashboard.QMessageBox.warning", lambda *args: None)
+    dashboard = OrionTrainerDashboard()
+
+    dashboard.btn_tensorboard.click()
+
+    assert not opened_urls
+    assert "TensorBoard is not running" in dashboard.status_label.text()
+    dashboard.close()
+    app.processEvents()
 
 
 def test_circle_impact_uses_restitution_and_separates_overlap():
@@ -114,6 +236,8 @@ def test_physics_stays_finite_in_bounds_and_over_100_steps_per_second():
 def test_short_sac_training_emits_progress_metrics_and_saves(tmp_path):
     output = tmp_path / "short_training_model.zip"
     project_root = Path(__file__).resolve().parents[1]
+    tensorboard_root = project_root / "sac_air_hockey_tensorboard"
+    existing_event_files = set(tensorboard_root.rglob("events.out.tfevents.*"))
     child_script = f"""
 import torch
 from PyQt5.QtCore import QCoreApplication
@@ -158,6 +282,25 @@ print(f'short SAC run saved model on {{worker._model.device}}')
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert output.is_file()
     assert "saved model on" in completed.stdout
+
+    from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
+
+    event_files = [
+        path for path in tensorboard_root.rglob("events.out.tfevents.*")
+        if path not in existing_event_files
+    ]
+    assert event_files, "training did not create a TensorBoard event file"
+    latest_event_file = max(event_files, key=lambda path: path.stat().st_mtime)
+    event_accumulator = EventAccumulator(str(latest_event_file))
+    event_accumulator.Reload()
+    scalar_tags = set(event_accumulator.Tags().get("scalars", []))
+    assert {
+        "1_Gedrag/Muurovertredingen",
+        "1_Gedrag/Verdediging_Dekking",
+        "1_Gedrag/Puck_Balcontact",
+        "2_Prestaties/Doelpunten_Voor",
+        "2_Prestaties/Doelpunten_Tegen",
+    } <= scalar_tags
 
 
 def test_launch_builder_button_requests_trainer_module():

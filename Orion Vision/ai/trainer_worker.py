@@ -5,16 +5,139 @@ from __future__ import annotations
 import threading
 import time
 import logging
+from collections import deque
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 from PyQt5.QtCore import QThread, pyqtSignal
+from stable_baselines3.common.callbacks import (
+    BaseCallback,
+    CallbackList,
+    EvalCallback,
+    StopTrainingOnNoModelImprovement,
+)
+
+from stable_baselines3.common.env_util import make_vec_env
+from stable_baselines3.common.vec_env import SubprocVecEnv
 
 from ai.air_hockey_env import AirHockeyGymEnv
 from ai.sac_controller import get_torch_runtime
 
 logger = logging.getLogger(__name__)
+
+
+def linear_schedule(initial_value: float, final_value: float = 1e-5):
+    """Linearly decay the learning rate as training progresses."""
+    def schedule(progress_remaining: float) -> float:
+        # progress_remaining gaat van 1.0 (start) naar 0.0 (einde)
+        return final_value + progress_remaining * (initial_value - final_value)
+
+    return schedule
+
+
+class AirHockeyMetricsCallback(BaseCallback):
+    """Record readable behavior, score, and episode metrics for TensorBoard."""
+
+    def __init__(self, verbose: int = 0) -> None:
+        super().__init__(verbose)
+        self.wall_violation_steps = 0
+        self.defensive_steps = 0
+        self.environment_steps = 0
+        self.robot_contacts = 0
+        self.goals_for = 0
+        self.goals_against = 0
+        self._episode_rewards = np.zeros(0, dtype=np.float64)
+        self._episode_lengths = np.zeros(0, dtype=np.int64)
+        self._recent_episode_rewards: deque[float] = deque(maxlen=100)
+        self._recent_episode_lengths: deque[int] = deque(maxlen=100)
+
+    def _on_training_start(self) -> None:
+        n_envs = self.training_env.num_envs
+        self._episode_rewards = np.zeros(n_envs, dtype=np.float64)
+        self._episode_lengths = np.zeros(n_envs, dtype=np.int64)
+
+    def _on_step(self) -> bool:
+        rewards = np.asarray(self.locals.get("rewards", []), dtype=np.float64).reshape(-1)
+        dones = np.asarray(self.locals.get("dones", []), dtype=bool).reshape(-1)
+        observations = np.asarray(self.locals.get("new_obs", []), dtype=np.float64)
+        if observations.ndim == 1:
+            observations = observations.reshape(1, -1)
+        infos = self.locals.get("infos", [])
+        if not isinstance(infos, (list, tuple)):
+            infos = []
+
+        n_envs = min(len(rewards), len(self._episode_rewards))
+        self.environment_steps += n_envs
+        self._episode_rewards[:n_envs] += rewards[:n_envs]
+        self._episode_lengths[:n_envs] += 1
+
+        for env_index in range(n_envs):
+            info = infos[env_index] if env_index < len(infos) else {}
+            if info.get("robot_contact", False):
+                self.robot_contacts += 1
+            if info.get("scored_for") == "robot":
+                self.goals_for += 1
+            elif info.get("scored_for") == "opponent":
+                self.goals_against += 1
+
+            observation = info.get("terminal_observation") if dones[env_index] else None
+            if observation is None and env_index < len(observations):
+                observation = observations[env_index]
+            if observation is not None and len(observation) >= 8:
+                half_length = AirHockeyGymEnv.FIELD_LENGTH_M / 2.0
+                half_width = AirHockeyGymEnv.FIELD_WIDTH_M / 2.0
+                robot_x = float(observation[6]) * half_length
+                robot_y = float(observation[7]) * half_width
+                wall_limit = (
+                    half_width
+                    - AirHockeyGymEnv.MALLET_RADIUS_M
+                    - 0.05
+                )
+                if abs(robot_y) > wall_limit:
+                    self.wall_violation_steps += 1
+
+                in_defensive_zone = (
+                    -half_length < robot_x < -half_length * 0.5
+                    and abs(robot_y) <= AirHockeyGymEnv.GOAL_WIDTH_M / 2.0
+                )
+                if in_defensive_zone:
+                    self.defensive_steps += 1
+
+            if env_index < len(dones) and dones[env_index]:
+                episode_info = info.get("episode", {})
+                episode_reward = float(episode_info.get("r", self._episode_rewards[env_index]))
+                episode_length = int(episode_info.get("l", self._episode_lengths[env_index]))
+                self._recent_episode_rewards.append(episode_reward)
+                self._recent_episode_lengths.append(episode_length)
+                self._episode_rewards[env_index] = 0.0
+                self._episode_lengths[env_index] = 0
+
+        self.logger.record("1_Gedrag/Muurovertredingen", self.wall_violation_steps)
+        defensive_coverage = (
+            100.0 * self.defensive_steps / self.environment_steps
+            if self.environment_steps
+            else 0.0
+        )
+        self.logger.record("1_Gedrag/Verdediging_Dekking", defensive_coverage)
+        self.logger.record("1_Gedrag/Puck_Balcontact", self.robot_contacts)
+        self.logger.record("2_Prestaties/Doelpunten_Voor", self.goals_for)
+        self.logger.record("2_Prestaties/Doelpunten_Tegen", self.goals_against)
+
+        if self._recent_episode_rewards:
+            self.logger.record(
+                "0_Overzicht/Gemiddelde_Beloning",
+                float(np.mean(self._recent_episode_rewards)),
+            )
+            self.logger.record(
+                "0_Overzicht/Gemiddelde_Episode_Duur_Stappen",
+                float(np.mean(self._recent_episode_lengths)),
+            )
+        return True
+
+    def _on_training_end(self) -> None:
+        if self.num_timesteps:
+            self.logger.dump(step=self.num_timesteps)
 
 
 class SACTrainerWorker(QThread):
@@ -31,8 +154,10 @@ class SACTrainerWorker(QThread):
         self,
         total_timesteps: int = 500_000,
         learning_rate: float = 3e-4,
-        buffer_size: int = 100_000,
+        buffer_size: int = 200_000,
         output_path: str | Path = "models/trained_sac_model.zip",
+        n_envs: int = 8,
+        reward_mode: str = "aggressive",
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -46,7 +171,11 @@ class SACTrainerWorker(QThread):
         self.total_timesteps = int(total_timesteps)
         self.learning_rate = float(learning_rate)
         self.buffer_size = int(buffer_size)
+        self.n_envs = int(n_envs)
+        if self.n_envs < 1:
+            raise ValueError("n_envs must be at least 1")
         self.output_path = Path(output_path)
+        self.reward_mode = AirHockeyGymEnv._resolve_reward_mode(reward_mode)
         self._pause_event = threading.Event()
         self._stop_event = threading.Event()
         self._model: Any | None = None
@@ -79,10 +208,10 @@ class SACTrainerWorker(QThread):
         return str(destination)
 
     def run(self) -> None:
+        eval_env: AirHockeyGymEnv | None = None
         try:
             torch = get_torch_runtime()
             from stable_baselines3 import SAC
-            from stable_baselines3.common.callbacks import BaseCallback
 
             worker = self
 
@@ -105,7 +234,15 @@ class SACTrainerWorker(QThread):
                     current_step = int(self.num_timesteps)
                     worker.progress_changed.emit(current_step, worker.total_timesteps)
                     if worker._env is not None:
-                        worker.observation_updated.emit(worker._env.observation)
+                        if hasattr(worker._env, "get_attr"):
+                            try:
+                                observations = worker._env.get_attr("observation")
+                                if observations:
+                                    worker.observation_updated.emit(observations[0])
+                            except Exception:
+                                pass
+                        elif hasattr(worker._env, "observation"):
+                            worker.observation_updated.emit(worker._env.observation)
 
                     now = time.perf_counter()
                     if now - self.last_metrics_at >= 0.5:
@@ -122,7 +259,22 @@ class SACTrainerWorker(QThread):
                         self.last_metrics_at = now
                     return True
 
-            self._env = AirHockeyGymEnv()
+            if self.n_envs > 1:
+                try:
+                    self._env = make_vec_env(
+                        AirHockeyGymEnv,
+                        n_envs=self.n_envs,
+                        vec_env_cls=SubprocVecEnv,
+                        env_kwargs={"reward_mode": self.reward_mode},
+                    )
+                except Exception as exc:  # pragma: no cover - safety fallback for PyQt multiprocess limits
+                    logger.warning(
+                        "Subprocess vectorized env failed; falling back to single env (%s)", exc
+                    )
+                    self._env = AirHockeyGymEnv(reward_mode=self.reward_mode)
+                    self.n_envs = 1
+            else:
+                self._env = AirHockeyGymEnv(reward_mode=self.reward_mode)
             if torch.cuda.is_available():
                 device = "cuda"
                 self.device_name = torch.cuda.get_device_name(0)
@@ -132,20 +284,52 @@ class SACTrainerWorker(QThread):
                 self.device_name = "CPU fallback"
                 self.device_used = device
 
-            logger.info("Starting SAC training on %s", self.device_used)
+            logger.info("Starting SAC training on %s with %d parallel envs", self.device_used, self.n_envs)
 
+            project_root = Path(__file__).resolve().parents[1]
+            tensorboard_log = Path(__file__).resolve().parents[1] / "sac_air_hockey_tensorboard"
+            best_model_dir = project_root / "models" / "best_model"
+            eval_log_dir = project_root / "models" / "best_model_eval_logs"
+            best_model_dir.mkdir(parents=True, exist_ok=True)
+            eval_log_dir.mkdir(parents=True, exist_ok=True)
+
+            eval_env = AirHockeyGymEnv(reward_mode=self.reward_mode)
+            stop_callback = StopTrainingOnNoModelImprovement(
+                max_no_improvement_evals=10,
+                min_evals=5,
+                verbose=1,
+            )
+            eval_callback = EvalCallback(
+                eval_env,
+                callback_after_eval=stop_callback,
+                best_model_save_path=str(best_model_dir),
+                log_path=str(eval_log_dir),
+                eval_freq=max(10_000 // self.n_envs, 1),
+                n_eval_episodes=10,
+                deterministic=True,
+                render=False,
+                verbose=1,
+            )
             self._model = SAC(
                 "MlpPolicy",
                 self._env,
-                learning_rate=self.learning_rate,
+                learning_rate=linear_schedule(self.learning_rate, 1e-5), # Expliciet 1e-5 als eindwaarde
+                batch_size=1024,
+                gamma=0.98,
+                tau=0.001,
                 buffer_size=self.buffer_size,
                 verbose=0,
                 device=device,
+                tensorboard_log=str(tensorboard_log),
             )
+            
             self.status_changed.emit(f"Training running on {self.device_used}")
             self._model.learn(
                 total_timesteps=self.total_timesteps,
-                callback=QtTrainingCallback(),
+                tb_log_name=f"SAC_{self.reward_mode}",
+                callback=CallbackList(
+                    [QtTrainingCallback(), AirHockeyMetricsCallback(), eval_callback]
+                ),
                 progress_bar=False,
             )
             self.progress_changed.emit(
@@ -160,6 +344,8 @@ class SACTrainerWorker(QThread):
             self.training_error.emit(f"Training failed: {type(exc).__name__}: {exc}")
             self.status_changed.emit("Training failed")
         finally:
+            if eval_env is not None:
+                eval_env.close()
             if self._env is not None:
                 self._env.close()
                 self._env = None
