@@ -62,8 +62,8 @@ class AirHockeyGymEnv(gym.Env[np.ndarray, np.ndarray]):
         self._episode_return = 0.0
         self._previous_robot_puck_distance = 0.0
         self._observation = np.zeros(8, dtype=np.float32)
+        self.opponent = ComplexOpponent()
 
-<<<<<<< HEAD
     @staticmethod
     def _resolve_reward_mode(reward_mode: str) -> str:
         mode = str(reward_mode).strip().lower()
@@ -71,10 +71,6 @@ class AirHockeyGymEnv(gym.Env[np.ndarray, np.ndarray]):
             valid_modes = ", ".join(AirHockeyGymEnv.REWARD_MODES)
             raise ValueError(f"reward_mode must be one of: {valid_modes}")
         return mode
-=======
-        # Maak een instantie aan van AttackerOpponent
-        self.opponent = ComplexOpponent()
->>>>>>> be50ecc772fa9bc313ca870529d78c31a15be18c
 
     @property
     def observation(self) -> np.ndarray:
@@ -136,11 +132,7 @@ class AirHockeyGymEnv(gym.Env[np.ndarray, np.ndarray]):
         
         self._steps += 1
         previous_puck_x = float(self._puck_position[0])
-<<<<<<< HEAD
         previous_robot_puck_distance = self._previous_robot_puck_distance
-
-=======
->>>>>>> be50ecc772fa9bc313ca870529d78c31a15be18c
         half_length = self.FIELD_LENGTH_M / 2.0
         half_width = self.FIELD_WIDTH_M / 2.0
         y_limit_mallet = half_width - self.MALLET_RADIUS_M
@@ -275,7 +267,9 @@ class AirHockeyGymEnv(gym.Env[np.ndarray, np.ndarray]):
         if is_stuck_in_wall:
             reward -= reward_profile["stuck_penalty"]
 
-<<<<<<< HEAD
+        if is_stuck_in_wall:
+            reward -= reward_profile["stuck_penalty"]
+
         if robot_contact:
             reward += reward_profile["robot_contact"]
             if self._puck_velocity[0] > 0.0:
@@ -290,68 +284,11 @@ class AirHockeyGymEnv(gym.Env[np.ndarray, np.ndarray]):
             reward += reward_profile["alignment_bonus"] * max(
                 0.0, 1.0 - lateral_error / (self.FIELD_WIDTH_M / 2.0)
             )
-=======
-        # ----------------------------------------------------------------------
-        # REWARD LOGICA (Sessie 03 Verbeterd)
-        # ----------------------------------------------------------------------
-        reward = -0.005  # Basis time penalty om actie te stimuleren
 
-        # --- 1. IMPACT REWARD (vervangt simpele contact reward) ---
-        if robot_contact:
-            # Bereken relatieve snelheid op het moment van impact
-            relative_vel = np.linalg.norm(self._robot_velocity - self._puck_velocity)
-            # Beloon alleen echte slagen (voorkomt 375 schoten/min 'contact farming')
-            if relative_vel > 0.5: 
-                reward += 0.5 * relative_vel 
-            else:
-                reward += 0.05 
-
-        if opponent_contact:
-            reward -= 0.1
-
-        # --- 2. ANTI-CAMPING & WALL PENALTY ---
-        # Straf voor het 'plakken' aan de achterwand (x_min ≈ -0.927)
-        if self._robot_position[0] < (-half_length + self.MALLET_RADIUS_M + 0.05):
-            puck_dist_x = abs(self._puck_position[0] - self._robot_position[0])
-            if puck_dist_x > 0.4:
-                reward -= 0.01  # Straf voor te passief wachten in de hoek
-        
-        # Straf voor te dicht bij de zijmuren (Wall Proximity Penalty uit logboek)
-        dist_to_wall = half_width - abs(self._robot_position[1])
-        if dist_to_wall < 0.05:
-            proximity = (0.05 - dist_to_wall) / 0.05
-            reward -= 0.05 * proximity
-
-        # --- 3. DYNAMISCHE CLEARANCE & PROGRESSIE ---
-        # Beloon het verplaatsen van de puck van eigen naar vijandelijke helft
-        if previous_puck_x < 0 and self._puck_position[0] >= 0:
-            reward += 1.0 
-        
-        # Progressie reward (alleen als de puck niet al bij de tegenstander ligt)
-        if self._puck_position[0] < 0.5:
-            reward += 0.02 * (self._puck_position[0] - previous_puck_x)
-
-        # --- 4. DEFENSIVE ALIGNMENT BONUS ---
-        if self._puck_position[0] < 0.0:  # Alleen als puck op onze helft is
-            # Bonus voor het staan tussen de puck en het doel
-            lateral_error = abs(self._robot_position[1] - self._puck_position[1])
-            reward += 0.03 * max(0.0, 1.0 - lateral_error / half_width)
-            
-            # Extra bonus voor positie voor het eigen doel (Defensive zone)
-            if self._robot_position[0] < -half_length / 2.0:
-                if abs(self._robot_position[1]) < self.GOAL_WIDTH_M / 2.0:
-                    reward += 0.02
-
-        # --- 5. SPARSE GOAL REWARDS ---
         if scored_right:
-            reward += 15.0
+            reward += reward_profile["goal_for"]
         elif scored_left:
-            reward -= 15.0
-
-        # ----------------------------------------------------------------------
-        # EINDE REWARD LOGICA
-        # ----------------------------------------------------------------------
->>>>>>> be50ecc772fa9bc313ca870529d78c31a15be18c
+            reward -= reward_profile["goal_against"]
 
         if scored_right:
             reward += reward_profile["goal_for"]
