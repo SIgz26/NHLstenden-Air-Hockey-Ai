@@ -13,7 +13,12 @@ import numpy as np
 from PyQt5.QtWidgets import QApplication, QPushButton
 
 from ai.air_hockey_env import AirHockeyGymEnv
-from ai.trainer_worker import AirHockeyMetricsCallback, SACTrainerWorker, linear_schedule
+from ai.trainer_worker import (
+    AirHockeyMetricsCallback,
+    PPOCurriculumWorker,
+    SACTrainerWorker,
+    linear_schedule,
+)
 from ui.ai_trainer_dashboard import OrionTrainerDashboard
 from ui.main_menu import OrionMainMenu
 
@@ -50,12 +55,91 @@ def test_reward_mode_is_configurable_and_kept_on_environment():
     assert worker.reward_mode == "defensive"
 
 
+def test_contact_threshold_and_clear_bonus_reward_logic():
+    env = AirHockeyGymEnv(seed=12, max_episode_steps=5, opponent_type="none")
+    env.reset(seed=13)
+
+    env._robot_position[:] = (-0.55, 0.0)
+    env._robot_velocity[:] = (0.0, 0.0)
+    env._puck_position[:] = (-0.80, 0.0)
+    env._puck_velocity[:] = (1.6, 0.0)
+
+    _, reward, _, _, _ = env.step(np.asarray([1.0, 0.0], dtype=np.float32))
+
+    assert reward > 2.0
+    assert env.opponent_type == "none"
+    env.close()
+
+
+def test_robot_is_clamped_to_15_cm_before_center_line():
+    env = AirHockeyGymEnv(seed=12, max_episode_steps=5, opponent_type="none")
+    env.reset(seed=13)
+    env._robot_position[:] = (-0.16, 0.0)
+    env._robot_velocity[:] = (2.5, 0.0)
+    env._puck_position[:] = (0.5, 0.3)
+    env._puck_velocity[:] = 0.0
+
+    env.step(np.asarray([1.0, 0.0], dtype=np.float32))
+
+    assert env.robot_position_m[0] <= -0.15
+    env.close()
+
+
+def test_clear_bonus_requires_active_puck_crossing():
+    quiet_env = AirHockeyGymEnv(seed=21, opponent_type="none")
+    quiet_env.reset(seed=21)
+    quiet_env._robot_position[:] = (-0.7, 0.3)
+    quiet_env._puck_position[:] = (-0.000001, 0.0)
+    quiet_env._puck_velocity[:] = (0.001, 0.0)
+    _, quiet_reward, _, _, _ = quiet_env.step(np.zeros(2, dtype=np.float32))
+
+    active_env = AirHockeyGymEnv(seed=21, opponent_type="none")
+    active_env.reset(seed=21)
+    active_env._robot_position[:] = (-0.7, 0.3)
+    active_env._puck_position[:] = (-0.001, 0.0)
+    active_env._puck_velocity[:] = (0.7, 0.0)
+    _, active_reward, _, _, _ = active_env.step(np.zeros(2, dtype=np.float32))
+
+    assert quiet_env.puck_position_m[0] >= 0.0
+    assert quiet_reward < 1.0
+    assert active_env.puck_position_m[0] >= 0.0
+    assert active_reward > 1.0
+    quiet_env.close()
+    active_env.close()
+
+
+def test_robot_is_penalized_for_forward_position_when_puck_is_opponent_side():
+    forward_env = AirHockeyGymEnv(seed=31, opponent_type="none")
+    forward_env.reset(seed=31)
+    forward_env._robot_position[:] = (-0.30, 0.0)
+    forward_env._puck_position[:] = (0.5, 0.3)
+    forward_env._puck_velocity[:] = 0.0
+    _, forward_reward, _, _, _ = forward_env.step(np.zeros(2, dtype=np.float32))
+
+    home_env = AirHockeyGymEnv(seed=31, opponent_type="none")
+    home_env.reset(seed=31)
+    home_env._robot_position[:] = (-0.40, 0.0)
+    home_env._puck_position[:] = (0.5, 0.3)
+    home_env._puck_velocity[:] = 0.0
+    _, home_reward, _, _, _ = home_env.step(np.zeros(2, dtype=np.float32))
+
+    assert np.isclose(home_reward - forward_reward, 0.02)
+    forward_env.close()
+    home_env.close()
+
+
 def test_learning_rate_schedule_decays_from_initial_to_final_value():
     schedule = linear_schedule(3e-4)
 
     assert np.isclose(schedule(1.0), 3e-4)
     assert np.isclose(schedule(0.5), (3e-4 + 1e-5) / 2.0)
     assert np.isclose(schedule(0.0), 1e-5)
+
+
+def test_ppo_curriculum_uses_defensive_rewards_in_later_stages():
+    assert PPOCurriculumWorker.STAGES[0][-1] == "aggressive"
+    assert PPOCurriculumWorker.STAGES[1][-1] == "defensive"
+    assert PPOCurriculumWorker.STAGES[2][-1] == "defensive"
 
 
 def test_air_hockey_metrics_callback_records_behavior_score_and_episode_metrics():
@@ -108,13 +192,119 @@ def test_air_hockey_metrics_callback_records_behavior_score_and_episode_metrics(
     assert model.logger.values["0_Overzicht/Gemiddelde_Episode_Duur_Stappen"] == 1.0
 
 
-def test_dashboard_exposes_reward_selector():
+def test_dashboard_exposes_training_modes_and_stage_monitor():
     app = QApplication.instance() or QApplication([])
     dashboard = OrionTrainerDashboard()
     assert hasattr(dashboard, "reward_mode_selector")
     assert dashboard.reward_mode_selector.currentText() == "aggressive"
+    assert dashboard.training_mode_selector.currentData() == "sac"
+    dashboard.training_mode_selector.setCurrentIndex(1)
+    assert dashboard.training_mode_selector.currentData() == "ppo"
+    assert "1,100,000" in dashboard.total_steps_label.text()
+    dashboard._on_stage_changed("Stage 2: Static Opponent")
+    assert dashboard.stage_label.text() == "Current stage: Stage 2: Static Opponent"
     dashboard.close()
     app.processEvents()
+
+
+def test_dashboard_starts_ppo_worker_for_curriculum_mode(monkeypatch):
+    app = QApplication.instance() or QApplication([])
+
+    class FakeSignal:
+        def connect(self, _slot):
+            pass
+
+    class FakeWorker:
+        def __init__(self, output_path=None, parent=None):
+            self.output_path = output_path
+            self.signals = [FakeSignal() for _ in range(8)]
+            (
+                self.progress_changed,
+                self.metrics_updated,
+                self.model_saved,
+                self.observation_updated,
+                self.status_changed,
+                self.training_error,
+                self.stage_changed,
+                self.finished,
+            ) = self.signals
+            self.started = False
+
+        def isRunning(self):
+            return False
+
+        def start(self):
+            self.started = True
+
+    monkeypatch.setattr("ui.ai_trainer_dashboard.PPOCurriculumWorker", FakeWorker)
+    dashboard = OrionTrainerDashboard()
+    dashboard.training_mode_selector.setCurrentIndex(1)
+
+    dashboard.start_training()
+
+    assert isinstance(dashboard.trainer_worker, FakeWorker)
+    assert dashboard.trainer_worker.started
+    assert dashboard.trainer_worker.output_path == dashboard.output_path_label.text()
+    dashboard._on_worker_finished()
+    dashboard.close()
+    app.processEvents()
+
+
+def test_dashboard_allows_custom_ppo_output_path(monkeypatch, tmp_path):
+    app = QApplication.instance() or QApplication([])
+    chosen_path = tmp_path / "runs" / "custom_ppo.zip"
+    dialogs = []
+
+    def choose_save_path(*args):
+        dialogs.append(args)
+        return str(chosen_path), "Stable-Baselines3 model (*.zip)"
+
+    monkeypatch.setattr(
+        "ui.ai_trainer_dashboard.QFileDialog.getSaveFileName",
+        choose_save_path,
+    )
+    dashboard = OrionTrainerDashboard()
+    dashboard.training_mode_selector.setCurrentIndex(1)
+
+    assert dashboard.btn_choose_output.isEnabled()
+    dashboard.btn_choose_output.click()
+
+    assert dashboard.output_path_label.text() == str(chosen_path)
+    assert dashboard._ppo_output_path == str(chosen_path)
+    assert dialogs[0][2].endswith("final_curriculum_ppo.zip")
+    dashboard.close()
+    app.processEvents()
+
+
+def test_ppo_worker_saves_stage_checkpoints_beside_selected_final_model(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    from ai.train_curriculum import train_stage
+
+    output_path = tmp_path / "models" / "custom_agent.zip"
+    calls = []
+    cumulative_timesteps = 0
+
+    def fake_train_stage(**kwargs):
+        nonlocal cumulative_timesteps
+        calls.append(kwargs)
+        cumulative_timesteps += kwargs["total_timesteps"]
+        return SimpleNamespace(num_timesteps=cumulative_timesteps)
+
+    monkeypatch.setattr("ai.train_curriculum.train_stage", fake_train_stage)
+    worker = PPOCurriculumWorker(output_path=output_path)
+
+    worker.run()
+
+    expected_paths = [
+        tmp_path / "models" / "custom_agent_stage1.zip",
+        tmp_path / "models" / "custom_agent_stage2.zip",
+        output_path,
+    ]
+    assert [Path(call["save_name"]) for call in calls] == expected_paths
+    assert calls[0]["previous_model_path"] is None
+    assert calls[1]["previous_model_path"] == str(expected_paths[0])
+    assert calls[2]["previous_model_path"] == str(expected_paths[1])
 
 
 def test_dashboard_opens_tensorboard_when_server_is_available(monkeypatch):
@@ -137,6 +327,7 @@ def test_dashboard_opens_tensorboard_when_server_is_available(monkeypatch):
 def test_dashboard_reports_when_tensorboard_server_is_unavailable(monkeypatch):
     app = QApplication.instance() or QApplication([])
     opened_urls = []
+    launched_commands = []
 
     def unavailable(*args, **kwargs):
         raise URLError("connection refused")
@@ -146,13 +337,23 @@ def test_dashboard_reports_when_tensorboard_server_is_unavailable(monkeypatch):
         "ui.ai_trainer_dashboard.webbrowser.open",
         lambda url: opened_urls.append(url) or True,
     )
+    monkeypatch.setattr(
+        "ui.ai_trainer_dashboard.subprocess.Popen",
+        lambda command, **kwargs: launched_commands.append((command, kwargs)),
+    )
     monkeypatch.setattr("ui.ai_trainer_dashboard.QMessageBox.warning", lambda *args: None)
     dashboard = OrionTrainerDashboard()
 
     dashboard.btn_tensorboard.click()
 
-    assert not opened_urls
-    assert "TensorBoard is not running" in dashboard.status_label.text()
+    assert opened_urls == ["http://localhost:6006"]
+    assert launched_commands
+    command, options = launched_commands[0]
+    assert command[command.index("--logdir") + 1] == str(
+        Path(__file__).resolve().parents[1] / "sac_air_hockey_tensorboard"
+    )
+    assert options["cwd"] == str(Path(command[command.index("--logdir") + 1]).parent)
+    assert "Starting TensorBoard" in dashboard.status_label.text()
     dashboard.close()
     app.processEvents()
 

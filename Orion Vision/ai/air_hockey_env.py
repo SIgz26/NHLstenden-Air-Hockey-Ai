@@ -9,6 +9,21 @@ from gymnasium import spaces
 from ai.opponents.attacker import AttackerOpponent, ComplexOpponent
 
 
+class StaticOpponent:
+    """Simple non-moving opponent placeholder for curriculum stages."""
+
+    def get_action(
+        self,
+        puck_pos: np.ndarray,
+        puck_vel: np.ndarray,
+        opponent_pos: np.ndarray,
+        field_length: float,
+        field_width: float,
+        mallet_radius: float,
+    ) -> np.ndarray:
+        return np.zeros(2, dtype=np.float64)
+
+
 class AirHockeyGymEnv(gym.Env[np.ndarray, np.ndarray]):
     """Air-hockey physics with an 8D normalized SimBridge observation.
 
@@ -38,16 +53,20 @@ class AirHockeyGymEnv(gym.Env[np.ndarray, np.ndarray]):
     DT = 1.0 / 120.0
     CONTACT_SLOP_M = 1e-5
 
+    VALID_OPPONENT_TYPES = ("none", "static", "complex")
+
     def __init__(
         self,
         max_episode_steps: int = 1000,
         seed: int | None = None,
         reward_mode: str = "aggressive",
+        opponent_type: str = "complex",
     ) -> None:
         super().__init__()
         if max_episode_steps < 1:
             raise ValueError("max_episode_steps must be at least 1")
         self.reward_mode = self._resolve_reward_mode(reward_mode)
+        self.opponent_type = self._resolve_opponent_type(opponent_type)
         self.observation_space = spaces.Box(-1.0, 1.0, shape=(8,), dtype=np.float32)
         self.action_space = spaces.Box(-1.0, 1.0, shape=(2,), dtype=np.float32)
         self.max_episode_steps = int(max_episode_steps)
@@ -62,7 +81,7 @@ class AirHockeyGymEnv(gym.Env[np.ndarray, np.ndarray]):
         self._episode_return = 0.0
         self._previous_robot_puck_distance = 0.0
         self._observation = np.zeros(8, dtype=np.float32)
-        self.opponent = ComplexOpponent()
+        self.opponent = self._build_opponent(self.opponent_type)
 
     @staticmethod
     def _resolve_reward_mode(reward_mode: str) -> str:
@@ -71,6 +90,22 @@ class AirHockeyGymEnv(gym.Env[np.ndarray, np.ndarray]):
             valid_modes = ", ".join(AirHockeyGymEnv.REWARD_MODES)
             raise ValueError(f"reward_mode must be one of: {valid_modes}")
         return mode
+
+    @staticmethod
+    def _resolve_opponent_type(opponent_type: str) -> str:
+        value = str(opponent_type).strip().lower()
+        if value not in AirHockeyGymEnv.VALID_OPPONENT_TYPES:
+            valid_types = ", ".join(AirHockeyGymEnv.VALID_OPPONENT_TYPES)
+            raise ValueError(f"opponent_type must be one of: {valid_types}")
+        return value
+
+    @staticmethod
+    def _build_opponent(opponent_type: str):
+        if opponent_type == "none":
+            return None
+        if opponent_type == "static":
+            return StaticOpponent()
+        return ComplexOpponent()
 
     @property
     def observation(self) -> np.ndarray:
@@ -114,7 +149,10 @@ class AirHockeyGymEnv(gym.Env[np.ndarray, np.ndarray]):
         )
         self._robot_position[:] = (-half_length * 0.72, self._rng.uniform(-0.15, 0.15))
         self._robot_velocity[:] = 0.0
-        self._opponent_position[:] = (half_length * 0.72, self._rng.uniform(-0.15, 0.15))
+        if self.opponent_type == "static":
+            self._opponent_position[:] = (half_length * 0.72, 0.0)
+        else:
+            self._opponent_position[:] = (half_length * 0.72, self._rng.uniform(-0.15, 0.15))
         self._opponent_velocity[:] = 0.0
         self._steps = 0
         self._episode_return = 0.0
@@ -135,172 +173,133 @@ class AirHockeyGymEnv(gym.Env[np.ndarray, np.ndarray]):
         previous_robot_puck_distance = self._previous_robot_puck_distance
         half_length = self.FIELD_LENGTH_M / 2.0
         half_width = self.FIELD_WIDTH_M / 2.0
-        y_limit_mallet = half_width - self.MALLET_RADIUS_M
+        max_y = half_width - self.MALLET_RADIUS_M
 
         # 1. Verplaats mallets
-        self._advance_mallet(
-            self._robot_position,
-            self._robot_velocity,
-            target_velocity,
-            (-half_length + self.MALLET_RADIUS_M, -self.MALLET_RADIUS_M),
-        )
+        self._advance_mallet(self._robot_position, self._robot_velocity, target_velocity,
+                             (-half_length + self.MALLET_RADIUS_M, -0.15))
 
-        desired_opponent_vel = self.opponent.get_action(
-            self._puck_position,
-            self._puck_velocity,
-            self._opponent_position,
-            self.FIELD_LENGTH_M,
-            self.FIELD_WIDTH_M,
-            self.MALLET_RADIUS_M,
-        )
-        self._advance_mallet(
-            self._opponent_position,
-            self._opponent_velocity,
-            desired_opponent_vel,
-            (self.MALLET_RADIUS_M, half_length - self.MALLET_RADIUS_M),
-        )
+        if self.opponent_type == "complex" and self.opponent is not None:
+            desired_opponent_vel = self.opponent.get_action(
+                self._puck_position, self._puck_velocity, self._opponent_position,
+                self.FIELD_LENGTH_M, self.FIELD_WIDTH_M, self.MALLET_RADIUS_M
+            )
+            self._advance_mallet(self._opponent_position, self._opponent_velocity, desired_opponent_vel,
+                                 (self.MALLET_RADIUS_M, half_length - self.MALLET_RADIUS_M))
+        elif self.opponent_type == "static":
+            self._opponent_position[:] = (half_length * 0.72, 0.0)
+            self._opponent_velocity[:] = 0.0
 
         # 2. Physics update
         self._puck_position += self._puck_velocity * self.DT
         self._resolve_puck_walls()
         self._puck_velocity *= 1.0 - self.PUCK_AIR_FRICTION * self.DT
 
-        robot_contact = self._resolve_mallet_puck_collision(
-            self._robot_position, self._robot_velocity
-        )
-        opponent_contact = self._resolve_mallet_puck_collision(
-            self._opponent_position, self._opponent_velocity
-        )
+        # Bewaar relatieve snelheid voor impact berekening
+        rel_vel_before = np.linalg.norm(self._robot_velocity - self._puck_velocity)
+
+        robot_contact = self._resolve_mallet_puck_collision(self._robot_position, self._robot_velocity)
+        opponent_contact = self._resolve_mallet_puck_collision(self._opponent_position, self._opponent_velocity)
         self._resolve_puck_walls()
 
-        # 3. Goal detectie
+        # 3. Status updates
         goal_opening_half = self.GOAL_WIDTH_M / 2.0 - self.PUCK_RADIUS_M
-        scored_right = (
-            self._puck_position[0] >= half_length - self.PUCK_RADIUS_M
-            and abs(float(self._puck_position[1])) <= goal_opening_half
-        )
-        scored_left = (
-            self._puck_position[0] <= -half_length + self.PUCK_RADIUS_M
-            and abs(float(self._puck_position[1])) <= goal_opening_half
-        )
+        scored_right = (self._puck_position[0] >= half_length - self.PUCK_RADIUS_M and abs(self._puck_position[1]) <= goal_opening_half)
+        scored_left = (self._puck_position[0] <= -half_length + self.PUCK_RADIUS_M and abs(self._puck_position[1]) <= goal_opening_half)
         current_robot_puck_distance = float(np.linalg.norm(self._puck_position - self._robot_position))
 
+        # ----------------------------------------------------------------------
+        # VERBETERDE REWARD PROFIELEN (Sessie 03)
+        # ----------------------------------------------------------------------
         reward_profile = {
             "aggressive": {
-                "base": -0.001,
-                "puck_progress": 0.12,
-                "attack_distance": 0.18,
-                "stuck_penalty": 0.02,
-                "robot_contact": 3.4,
-                "impact_scale": 1.0,
-                "opponent_contact_penalty": 0.08,
-                "alignment_bonus": 0.04,
-                "goal_for": 10.0,
-                "goal_against": 3.0,
+                "base": -0.01,
+                "clear_bonus": 2.0,
+                "robot_contact": 1.8,
+                "goal_for": 25.0,
+                "goal_against": -25.0,
+                "wall_penalty": 0.05,
+                "defensive_alignment": 0.08,
+                "opponent_contact_penalty": 0.10,
             },
             "balanced": {
-                "base": -0.001,
-                "puck_progress": 0.10,
-                "attack_distance": 0.15,
-                "stuck_penalty": 0.02,
-                "robot_contact": 3.0,
-                "impact_scale": 1.0,
-                "opponent_contact_penalty": 0.08,
-                "alignment_bonus": 0.05,
-                "goal_for": 10.0,
-                "goal_against": 3.0,
+                "base": -0.01,
+                "clear_bonus": 2.0,
+                "robot_contact": 1.6,
+                "goal_for": 25.0,
+                "goal_against": -25.0,
+                "wall_penalty": 0.05,
+                "defensive_alignment": 0.06,
+                "opponent_contact_penalty": 0.10,
             },
             "defensive": {
-                "base": -0.001,
-                "puck_progress": 0.08,
-                "attack_distance": 0.10,
-                "stuck_penalty": 0.04,
-                "robot_contact": 2.5,
-                "impact_scale": 0.9,
-                "opponent_contact_penalty": 0.06,
-                "alignment_bonus": 0.08,
-                "goal_for": 9.0,
-                "goal_against": 2.5,
+                "base": -0.01,
+                "clear_bonus": 2.0,
+                "robot_contact": 1.4,
+                "goal_for": 25.0,
+                "goal_against": -25.0,
+                "wall_penalty": 0.05,
+                "defensive_alignment": 0.10,
+                "opponent_contact_penalty": 0.10,
             },
         }[self.reward_mode]
 
-        reward = reward_profile["base"] + reward_profile["puck_progress"] * (
-            float(self._puck_position[0]) - previous_puck_x
-        )
+        reward = float(reward_profile["base"])
+
+        active_clear = robot_contact or self._puck_velocity[0] > 0.5
+        if previous_puck_x < 0.0 and self._puck_position[0] >= 0.0 and active_clear:
+            reward += reward_profile["clear_bonus"]
 
         if self._puck_position[0] < 0.0:
-            reward += reward_profile["attack_distance"] * max(
-                0.0, previous_robot_puck_distance - current_robot_puck_distance
-            )
-        # --- NIEUW / AANGEPAST: 1. Straf voor te dicht bij de zijkanten (Muren) ---
-        # y_limit voor de mallet is FIELD_WIDTH_M / 2 - MALLET_RADIUS_M
-        max_y = self.FIELD_WIDTH_M / 2.0 - self.MALLET_RADIUS_M
-        wall_distance_threshold = 0.05  # Binnen 5 cm van de muur
-        
+            y_diff = abs(float(self._robot_position[1] - self._puck_position[1]))
+            alignment = max(0.0, 1.0 - (y_diff / half_width))
+            reward += reward_profile["defensive_alignment"] * alignment
+
+        attack_distance = float(np.linalg.norm(self._puck_position - self._robot_position))
+        if (
+            self._puck_position[0] < 0.0
+            and self._robot_position[0] > self._puck_position[0]
+            and self._puck_velocity[0] > 0.8
+            and attack_distance < 0.40
+            and target_velocity[0] > 0.5
+        ):
+            reward += 2.5 * min(1.0, self._puck_velocity[0] / 1.5)
+
         current_y_abs = abs(float(self._robot_position[1]))
-        if current_y_abs > (max_y - wall_distance_threshold):
-            # Proportionele straf: hoe dichter bij de muur, hoe hoger de straf
-            proximity = (current_y_abs - (max_y - wall_distance_threshold)) / wall_distance_threshold
-            reward -= 0.05 * proximity  # Instelbare factor (bijv. -0.05 max per stap)
+        wall_threshold = 0.05
+        if current_y_abs > (max_y - wall_threshold):
+            proximity = (current_y_abs - (max_y - wall_threshold)) / wall_threshold
+            reward -= reward_profile["wall_penalty"] * max(0.0, proximity)
 
-        # --- NIEUW: 2. Pluspunt voor verdedigende positie voor het eigen doel ---
-        # Eigen doel ligt aan de linkerkant (x < 0)
-        # Check of robot op eigen helft staat én voor de opening van het doel (GOAL_WIDTH_M)
-        in_defensive_x = -half_length < self._robot_position[0] < -half_length * 0.5
-        in_goal_y_range = abs(self._robot_position[1]) <= (self.GOAL_WIDTH_M / 2.0)
+        if robot_contact and rel_vel_before > 0.8:
+            impact_strength = 0.5 + min(1.0, rel_vel_before / 1.5)
+            reward += reward_profile["robot_contact"] * impact_strength
 
-        if in_defensive_x and in_goal_y_range:
-            reward += 0.02  # Kleine constante bonus voor afdekken van het doel
-            if self._puck_position[0] < 0.0:
-                y_diff = abs(self._robot_position[1] - self._puck_position[1])
-                alignment = max(0.0, 1.0 - (y_diff / (self.FIELD_WIDTH_M / 2.0)))
-                reward += 0.03 * alignment
+        if self._puck_position[0] >= 0.0 and self._robot_position[0] > -0.35:
+            reward -= 0.02
 
         near_back_wall = abs(float(self._robot_position[0] + half_length)) < 0.05
-        near_side_wall = abs(float(self._robot_position[1])) > (self.FIELD_WIDTH_M / 2.0 - 0.05)
-        is_stuck_in_wall = (
-            (near_back_wall or near_side_wall)
-            and float(np.linalg.norm(self._robot_velocity)) < 0.05
-            and previous_robot_puck_distance - current_robot_puck_distance <= 0.0
-        )
-
-        if is_stuck_in_wall:
-            reward -= reward_profile["stuck_penalty"]
-
-        if is_stuck_in_wall:
-            reward -= reward_profile["stuck_penalty"]
-
-        if robot_contact:
-            reward += reward_profile["robot_contact"]
-            if self._puck_velocity[0] > 0.0:
-                impact_bonus = float(np.clip(1.0 + 1.0 * self._puck_velocity[0], 1.0, 4.0))
-                reward += impact_bonus * reward_profile["impact_scale"]
+        near_side_wall = abs(float(self._robot_position[1])) > (max_y - 0.05)
+        if (near_back_wall or near_side_wall) and np.linalg.norm(self._robot_velocity) < 0.05:
+            if previous_robot_puck_distance <= current_robot_puck_distance:
+                reward -= 0.02
 
         if opponent_contact:
             reward -= reward_profile["opponent_contact_penalty"]
 
-        if self._puck_position[0] < 0.0:
-            lateral_error = abs(float(self._robot_position[1] - self._puck_position[1]))
-            reward += reward_profile["alignment_bonus"] * max(
-                0.0, 1.0 - lateral_error / (self.FIELD_WIDTH_M / 2.0)
-            )
-
         if scored_right:
             reward += reward_profile["goal_for"]
         elif scored_left:
-            reward -= reward_profile["goal_against"]
+            reward += reward_profile["goal_against"]
 
-        if scored_right:
-            reward += reward_profile["goal_for"]
-        elif scored_left:
-            reward -= reward_profile["goal_against"]
-
+        # Afsluiting step
         self._previous_robot_puck_distance = current_robot_puck_distance
-        terminated = bool(scored_right or scored_left)
-        truncated = self._steps >= self.max_episode_steps
         self._episode_return += reward
         self._observation = self._make_observation()
         
+        terminated = bool(scored_right or scored_left)
+        truncated = self._steps >= self.max_episode_steps
+
         info = {
             "goal_scored": bool(scored_right or scored_left),
             "scored_for": "robot" if scored_right else "opponent" if scored_left else None,
@@ -308,8 +307,12 @@ class AirHockeyGymEnv(gym.Env[np.ndarray, np.ndarray]):
             "opponent_contact": opponent_contact,
             "episode_return": self._episode_return,
         }
-        
+
         return self._observation.copy(), float(reward), terminated, truncated, info
+
+
+
+
     def _advance_mallet(
         self,
         position: np.ndarray,

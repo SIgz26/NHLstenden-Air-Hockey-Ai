@@ -19,7 +19,7 @@ class OrionMainMenu(QWidget):
         top_bar = QHBoxLayout()
         
         header_text_layout = QVBoxLayout()
-        title_label = QLabel("ORION AI VISION ENGINE BETA 1.1.0")
+        title_label = QLabel("ORION AI VISION ENGINE BETA 1.2.1")
         title_label.setObjectName("TitleLabel")
         subtitle_label = QLabel("// SELECT MODULE TO LAUNCH")
         subtitle_label.setObjectName("SubTitleLabel")
@@ -128,6 +128,29 @@ class OrionMainMenu(QWidget):
         cards_layout.addWidget(card_analyzer, 1)
         cards_layout.addWidget(card_live, 1)
         cards_layout.addWidget(card_ai, 1)
+
+        card_playground = QFrame()
+        card_playground.setObjectName("CardFrame")
+        play_layout = QVBoxLayout(card_playground)
+        play_layout.setContentsMargins(20, 20, 20, 20)
+
+        play_title = QLabel("PLAYGROUND / MATCH SIMULATOR")
+        play_title.setFont(QFont("Arial", 14, QFont.Bold))
+        play_title.setStyleSheet("color: rgb(184, 98, 48);")
+
+        play_body = QLabel(
+            "Speel zelf met de muis of laat opgeslagen AI-modellen tegen elkaar matchen."
+        )
+        play_body.setWordWrap(True)
+
+        btn_launch_playground = QPushButton("OPEN PLAYGROUND")
+        btn_launch_playground.clicked.connect(lambda: self.on_select_module("playground"))
+
+        play_layout.addWidget(play_title)
+        play_layout.addWidget(play_body)
+        play_layout.addStretch()
+        play_layout.addWidget(btn_launch_playground)
+        cards_layout.addWidget(card_playground, 1)
         
 
         layout.addLayout(cards_layout)

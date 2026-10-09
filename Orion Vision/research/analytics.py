@@ -1,4 +1,4 @@
-"""Utilities for analyzing SAC training runs and benchmarking air-hockey models."""
+"""Utilities for analyzing SAC/PPO runs and benchmarking air-hockey models."""
 
 from __future__ import annotations
 
@@ -10,26 +10,22 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
-from stable_baselines3 import SAC
+from stable_baselines3 import PPO, SAC
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
 from ai.air_hockey_env import AirHockeyGymEnv
 
-CURRENT_DIR = Path.cwd()
-
-if CURRENT_DIR.name == "research":
-    PROJECT_ROOT = CURRENT_DIR.parent
-else:
-    PROJECT_ROOT = CURRENT_DIR
-
-MODEL_ROOT = PROJECT_ROOT / "models/Sessie02"
-TB_LOG_ROOT = PROJECT_ROOT / "sac_air_hockey_tensorboard" 
-
-#PROJECT_ROOT = Path(__file__).resolve().parents[1]
-PROJECT_ROOT = Path.cwd().parent if Path.cwd().name == "research" else Path.cwd()
+PROJECT_ROOT = next(
+    (
+        parent
+        for parent in (Path.cwd(), *Path.cwd().parents)
+        if (parent / "ai" / "air_hockey_env.py").is_file()
+    ),
+    Path(__file__).resolve().parents[1],
+)
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-MODEL_ROOT = PROJECT_ROOT / "models/Sessie02"
+MODEL_ROOT = PROJECT_ROOT / "models" / "Sessie04"
 TB_LOG_ROOT = PROJECT_ROOT / "sac_air_hockey_tensorboard"
 
 
@@ -69,12 +65,25 @@ def load_tensorboard_metrics(root: str | Path = TB_LOG_ROOT) -> dict[str, pd.Dat
     }
 
 
-def load_model(model_path: str | Path) -> SAC:
-    """Load a trained SB3 SAC model from disk."""
+def _get_model_class(algorithm: str):
+    models = {"sac": SAC, "ppo": PPO}
+    name = str(algorithm).strip().lower()
+    if name not in models:
+        raise ValueError(f"algorithm must be one of: {', '.join(models)}")
+    return models[name]
+
+
+def load_model(
+    model_path: str | Path,
+    algorithm: str = "sac",
+    env=None,
+) -> SAC | PPO:
+    """Load a trained SB3 SAC or PPO model from disk."""
     model_file = Path(model_path)
     if not model_file.is_absolute():
         model_file = PROJECT_ROOT / model_file
-    return SAC.load(str(model_file), env=AirHockeyGymEnv(reward_mode="aggressive"))
+    model_class = _get_model_class(algorithm)
+    return model_class.load(str(model_file), env=env)
 
 
 def evaluate_model(
@@ -83,6 +92,8 @@ def evaluate_model(
     reward_mode: str = "aggressive",
     max_steps: int = 1000,
     seed: int | None = None,
+    algorithm: str = "sac",
+    opponent_type: str = "complex",
 ) -> tuple[pd.DataFrame, dict[str, float]]:
     """Run deterministic episodes and summarize goals, shots, speed, and response latency.
 
@@ -92,11 +103,16 @@ def evaluate_model(
     if episodes < 1:
         raise ValueError("episodes must be at least 1")
 
-    env = AirHockeyGymEnv(reward_mode=reward_mode, max_episode_steps=max_steps, seed=seed)
+    env = AirHockeyGymEnv(
+        reward_mode=reward_mode,
+        max_episode_steps=max_steps,
+        seed=seed,
+        opponent_type=opponent_type,
+    )
     model_file = Path(model_path).expanduser()
     if not model_file.is_absolute():
         model_file = PROJECT_ROOT / model_file
-    model = SAC.load(str(model_file), env=env)
+    model = load_model(model_file, algorithm=algorithm, env=env)
 
     rows: list[dict[str, float | int]] = []
     total_goals_for = 0
@@ -292,15 +308,22 @@ def collect_robot_positions(
     reward_mode: str = "aggressive",
     max_steps: int = 1000,
     seed: int = 7,
+    algorithm: str = "sac",
+    opponent_type: str = "complex",
 ) -> list[np.ndarray]:
     """Collect robot positions across evaluation episodes for heatmap analysis."""
     if episodes < 1:
         raise ValueError("episodes must be at least 1")
-    env = AirHockeyGymEnv(reward_mode=reward_mode, max_episode_steps=max_steps, seed=seed)
+    env = AirHockeyGymEnv(
+        reward_mode=reward_mode,
+        max_episode_steps=max_steps,
+        seed=seed,
+        opponent_type=opponent_type,
+    )
     model_file = Path(model_path).expanduser()
     if not model_file.is_absolute():
         model_file = PROJECT_ROOT / model_file
-    model = SAC.load(str(model_file), env=env)
+    model = load_model(model_file, algorithm=algorithm, env=env)
     positions: list[np.ndarray] = []
 
     try:
