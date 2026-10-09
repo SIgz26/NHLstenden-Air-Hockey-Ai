@@ -361,3 +361,131 @@ class SACTrainerWorker(QThread):
         destination.parent.mkdir(parents=True, exist_ok=True)
         self._model.save(str(destination.with_suffix("")))
         return destination
+
+
+class PPOCurriculumWorker(QThread):
+    """Run the staged PPO curriculum and stream dashboard telemetry."""
+
+    progress_changed = pyqtSignal(int, int)
+    metrics_updated = pyqtSignal(float, float, float)
+    model_saved = pyqtSignal(str)
+    observation_updated = pyqtSignal(object)
+    status_changed = pyqtSignal(str)
+    stage_changed = pyqtSignal(str)
+    training_error = pyqtSignal(str)
+
+    STAGES = (
+        ("Stage 1: No Opponent", "none", 300_000, "stage1_ppo.zip", "Stage1_Puck_Raken", "aggressive"),
+        ("Stage 2: Static Opponent", "static", 300_000, "stage2_ppo.zip", "Stage2_Static_Opponent", "defensive"),
+        ("Stage 3: Complex Opponent", "complex", 500_000, "final_curriculum_ppo.zip", "Stage3_Complex_Opponent", "defensive"),
+    )
+
+    def __init__(
+        self,
+        output_path: str | Path = "models/final_curriculum_ppo.zip",
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self.total_timesteps = sum(stage[2] for stage in self.STAGES)
+        self.output_path = Path(output_path).expanduser()
+        self._pause_event = threading.Event()
+        self._stop_event = threading.Event()
+        self._model: Any | None = None
+        self._env: Any | None = None
+        self._started_at = 0.0
+
+    def pause_training(self) -> None:
+        self._pause_event.set()
+        self.status_changed.emit("Training paused")
+
+    def resume_training(self) -> None:
+        self._pause_event.clear()
+        self.status_changed.emit("Training running")
+
+    def stop_training(self) -> None:
+        self._stop_event.set()
+        self._pause_event.clear()
+
+    def run(self) -> None:
+        from stable_baselines3.common.callbacks import BaseCallback
+
+        from ai.train_curriculum import ROOT_DIR, train_stage
+
+        worker = self
+        completed_steps = 0
+        previous_checkpoint: str | None = None
+        self._started_at = time.perf_counter()
+        output_path = self.output_path
+        if not output_path.is_absolute():
+            output_path = ROOT_DIR / output_path
+
+        try:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            for stage_index, (stage_label, opponent_type, stage_steps, _checkpoint, run_name, reward_mode) in enumerate(self.STAGES):
+                if self._stop_event.is_set():
+                    break
+                stage_output_path = (
+                    output_path
+                    if stage_index == len(self.STAGES) - 1
+                    else output_path.with_name(f"{output_path.stem}_stage{stage_index + 1}.zip")
+                )
+                self.stage_changed.emit(stage_label)
+                self.status_changed.emit(f"{stage_label} running")
+                stage_start = int(self._model.num_timesteps) if self._model is not None else 0
+
+                class DashboardCallback(BaseCallback):
+                    def _on_step(self) -> bool:
+                        if worker._stop_event.is_set():
+                            return False
+                        while worker._pause_event.is_set() and not worker._stop_event.is_set():
+                            time.sleep(0.05)
+                        if worker._stop_event.is_set():
+                            return False
+
+                        stage_progress = max(0, int(self.num_timesteps) - stage_start)
+                        worker.progress_changed.emit(
+                            min(completed_steps + stage_progress, worker.total_timesteps),
+                            worker.total_timesteps,
+                        )
+                        try:
+                            observations = self.training_env.get_attr("observation")
+                            if observations:
+                                worker.observation_updated.emit(observations[0])
+                        except (AttributeError, IndexError, RuntimeError):
+                            pass
+
+                        now = time.perf_counter()
+                        if now - self.last_metrics_at >= 0.5:
+                            rewards = getattr(self.model, "ep_info_buffer", [])
+                            mean_reward = float(np.mean([item["r"] for item in rewards])) if rewards else 0.0
+                            elapsed = max(now - worker._started_at, 1e-6)
+                            fps = float(self.num_timesteps / elapsed)
+                            values = getattr(self.model.logger, "name_to_value", {})
+                            value_loss = float(values.get("train/value_loss", 0.0))
+                            worker.metrics_updated.emit(mean_reward, fps, value_loss)
+                            self.last_metrics_at = now
+                        return True
+
+                    def _on_training_start(self) -> None:
+                        self.last_metrics_at = time.perf_counter()
+
+                callback = DashboardCallback()
+                self._model = train_stage(
+                    opponent_type=opponent_type,
+                    total_timesteps=stage_steps,
+                    save_name=str(stage_output_path),
+                    previous_model_path=previous_checkpoint,
+                    stage_name=run_name,
+                    seed=42,
+                    reward_mode=reward_mode,
+                    callback=callback,
+                )
+                completed_steps += min(stage_steps, max(0, int(self._model.num_timesteps) - stage_start))
+                self.progress_changed.emit(min(completed_steps, self.total_timesteps), self.total_timesteps)
+                previous_checkpoint = str(stage_output_path)
+                self.model_saved.emit(previous_checkpoint)
+
+            self.status_changed.emit("Curriculum stopped and latest checkpoint saved" if self._stop_event.is_set() else "Curriculum training complete")
+        except Exception as exc:
+            self.training_error.emit(f"Training failed: {type(exc).__name__}: {exc}")
+            self.status_changed.emit("Training failed")

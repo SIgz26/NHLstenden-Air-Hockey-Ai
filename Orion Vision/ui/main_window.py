@@ -14,6 +14,7 @@ from ui.dashboard import OrionDashboard
 from ui.live_dashboard import OrionLiveDashboard
 from ui.settings_dashboard import OrionSettingsDashboard
 from ui.ai_trainer_dashboard import OrionTrainerDashboard
+from ui.playground_dashboard import PlaygroundDashboard
 from ui.sound_manager import HoverSoundManager
 
 
@@ -37,6 +38,7 @@ class OrionMainWindow(QMainWindow):
         self.live_dashboard_widget = None
         self.settings_dashboard_widget = None
         self.ai_trainer_dashboard_widget = None
+        self.playground_dashboard_widget = None
 
         self.intro_widget = OrionIntroWidget(on_finished_callback=self.show_main_menu)
         self.stack.addWidget(self.intro_widget)
@@ -91,6 +93,14 @@ class OrionMainWindow(QMainWindow):
             self.stack.addWidget(self.ai_trainer_dashboard_widget)
             self.hover_sound_manager.register_widget(self.ai_trainer_dashboard_widget)
 
+    def _ensure_playground_dashboard(self):
+        if self.playground_dashboard_widget is None:
+            self.playground_dashboard_widget = PlaygroundDashboard(
+                on_back_callback=self.show_main_menu
+            )
+            self.stack.addWidget(self.playground_dashboard_widget)
+            self.hover_sound_manager.register_widget(self.playground_dashboard_widget)
+
     def show_main_menu(self):
         self._ensure_main_menu()
         self.stack.setCurrentWidget(self.main_menu_widget)
@@ -108,3 +118,6 @@ class OrionMainWindow(QMainWindow):
         elif module_name == "ai_trainer":
             self._ensure_ai_trainer_dashboard()
             self.stack.setCurrentWidget(self.ai_trainer_dashboard_widget)
+        elif module_name == "playground":
+            self._ensure_playground_dashboard()
+            self.stack.setCurrentWidget(self.playground_dashboard_widget)

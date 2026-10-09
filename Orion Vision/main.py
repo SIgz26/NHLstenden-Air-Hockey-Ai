@@ -1,11 +1,9 @@
 #
-#versie: BETA 1.2.0
+#versie: BETA 1.2.1
 #door: Timo Zylstra
-#datum: 01-10-2026
-#nieuw: Handmatige 4-punts tafelkalibratie, perspectiefcorrectie en zichtbare kalibratie-overlay.
-#nieuw: ArUco-tracking voor robot en tegenstander, plus 2D Digital Twin met SAC-acties en puckbaanvoorspelling.
-#nieuw: SAC-trainer met Gymnasium airhockeyfysica, modelopslag en CUDA-training (met CPU-fallback).
+#datum: 09-10-2026
 #
+
 import os
 import sys
 import ctypes
