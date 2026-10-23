@@ -65,7 +65,7 @@ def mouse_position_to_world(
 
 
 def load_policy(model_path: str | Path) -> Any:
-    """Load an SB3 PPO or SAC archive without requiring a separate selector."""
+    """Load an SB3 PPO or SAC archive."""
     path = Path(model_path).expanduser()
     try:
         return PPO.load(str(path), device="auto")
@@ -106,8 +106,13 @@ class MatchSimulator:
             self.model_b = load_policy(self.model_b_path)
 
         opponent_type = "complex" if mode == AI_VS_SCRIPTED else "none"
-        self.env = AirHockeyGymEnv(seed=seed, opponent_type=opponent_type)
+        self.env = AirHockeyGymEnv(
+            seed=seed,
+            opponent_type=opponent_type,
+            puck_start_side="opponent",
+        )
         self.observation, _ = self.env.reset(seed=seed)
+        self._reset_policy_states()
         self.mouse_target_m = self.env.robot_position_m.copy()
         self.elapsed_steps = 0
 
@@ -115,6 +120,15 @@ class MatchSimulator:
     def _predict(model: Any, observation: np.ndarray) -> np.ndarray:
         action, _ = model.predict(observation, deterministic=True)
         return np.clip(np.asarray(action, dtype=np.float32).reshape(2), -1.0, 1.0)
+
+    def _reset_policy_states(self) -> None:
+        reset_a = getattr(self.model_a, "reset", None)
+        if callable(reset_a):
+            reset_a(self.observation)
+
+        reset_b = getattr(self.model_b, "reset", None)
+        if callable(reset_b):
+            reset_b(mirror_observation_for_right_player(self.observation))
 
     def set_mouse_target(self, x_m: float, y_m: float) -> None:
         half_width = self.env.FIELD_WIDTH_M / 2.0 - self.env.MALLET_RADIUS_M
@@ -166,6 +180,7 @@ class MatchSimulator:
     def reset_after_goal(self, scored_for: str | None = None) -> None:
         """Reset positions and serve from center while preserving match clock."""
         self.observation, _ = self.env.reset()
+        self._reset_policy_states()
         serve_direction = 1.0 if scored_for == "robot" else -1.0
         self.env._puck_position[:] = (0.0, 0.0)
         self.env._puck_velocity[:] = (serve_direction * 0.8, 0.0)
@@ -173,6 +188,7 @@ class MatchSimulator:
             np.linalg.norm(self.env._puck_position - self.env._robot_position)
         )
         self.observation = self.env._make_observation()
+        self._reset_policy_states()
 
     def reset_puck(self) -> None:
         """Place the puck at center and stop it without resetting the score."""
@@ -182,6 +198,7 @@ class MatchSimulator:
             np.linalg.norm(self.env._puck_position - self.env._robot_position)
         )
         self.observation = self.env._make_observation()
+        self._reset_policy_states()
 
     @property
     def puck_speed_mps(self) -> float:

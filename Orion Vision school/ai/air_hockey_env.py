@@ -61,12 +61,16 @@ class AirHockeyGymEnv(gym.Env[np.ndarray, np.ndarray]):
         seed: int | None = None,
         reward_mode: str = "aggressive",
         opponent_type: str = "complex",
+        puck_start_side: str = "opponent",
     ) -> None:
         super().__init__()
         if max_episode_steps < 1:
             raise ValueError("max_episode_steps must be at least 1")
         self.reward_mode = self._resolve_reward_mode(reward_mode)
         self.opponent_type = self._resolve_opponent_type(opponent_type)
+        if puck_start_side not in ("robot", "opponent"):
+            raise ValueError("puck_start_side must be 'robot' or 'opponent'")
+        self.puck_start_side = puck_start_side
         self.observation_space = spaces.Box(-1.0, 1.0, shape=(8,), dtype=np.float32)
         self.action_space = spaces.Box(-1.0, 1.0, shape=(2,), dtype=np.float32)
         self.max_episode_steps = int(max_episode_steps)
@@ -137,14 +141,19 @@ class AirHockeyGymEnv(gym.Env[np.ndarray, np.ndarray]):
         if seed is not None:
             self._rng = np.random.default_rng(seed)
         half_length = self.FIELD_LENGTH_M / 2.0
+        puck_min_x, puck_max_x = (0.15, max(0.25, half_length * 0.70))
+        puck_x = self._rng.uniform(puck_min_x, puck_max_x)
+        if self.puck_start_side == "robot":
+            puck_x = -puck_x
         self._puck_position[:] = (
-            self._rng.uniform(0.15, max(0.25, half_length * 0.70)),
+            puck_x,
             self._rng.uniform(-0.22, 0.22),
         )
         speed = self._rng.uniform(0.35, 1.2)
         angle = self._rng.uniform(-np.pi / 2.0, np.pi / 2.0)
+        direction = 1.0 if self.puck_start_side == "robot" else -1.0
         self._puck_velocity[:] = (
-            -speed * np.cos(angle),
+            direction * speed * np.cos(angle),
             speed * np.sin(angle),
         )
         self._robot_position[:] = (-half_length * 0.72, self._rng.uniform(-0.15, 0.15))
