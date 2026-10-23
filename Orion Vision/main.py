@@ -1,5 +1,5 @@
 #
-#versie: BETA 1.2.1
+#versie: BETA 1.2.2
 #door: Timo Zylstra
 #datum: 09-10-2026
 #

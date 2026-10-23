@@ -21,7 +21,7 @@ from ui.sound_manager import HoverSoundManager
 class OrionMainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("ORION - AI Vision System BETA 1.2.0")
+        self.setWindowTitle("ORION - AI Vision System BETA 1.2.2")
         self.resize(1150, 720)
 
         self.hover_sound_manager = HoverSoundManager(self)
