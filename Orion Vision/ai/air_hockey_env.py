@@ -274,14 +274,20 @@ class AirHockeyGymEnv(gym.Env[np.ndarray, np.ndarray]):
         ):
             reward += 2.5 * min(1.0, self._puck_velocity[0] / 1.5)
 
-        # 1. Wand penalty voor zijwanden (Y)
+        # 1. Wand penalty & buffer voor zijwanden (Y-as uitersten)
+        # Voorkomt dat de robot tegen de zijrails van het H-portaal beukt of doordrukt
+        y_threshold = 0.08  # 8 cm bufferzone aan beide zijwanden
         current_y_abs = abs(float(self._robot_position[1]))
-        wall_threshold = 0.05
-        if current_y_abs > (max_y - wall_threshold):
-            proximity = (current_y_abs - (max_y - wall_threshold)) / wall_threshold
-            reward -= reward_profile["wall_penalty"] * max(0.0, proximity)
+        if current_y_abs > (max_y - y_threshold):
+            y_proximity = (current_y_abs - (max_y - y_threshold)) / y_threshold
+            reward -= (reward_profile["wall_penalty"] * 2.5) * max(0.0, y_proximity)
+            pushing_into_side_wall = (self._robot_position[1] > 0.0 and target_velocity[1] > 0.1) or (
+                self._robot_position[1] < 0.0 and target_velocity[1] < -0.1
+            )
+            if pushing_into_side_wall:
+                reward -= 0.10 * (abs(target_velocity[1]) / self.MAX_MALLET_SPEED_MPS)
 
-        # 2. Wand penalty voor voorwaartse middellijn grens (X = -0.15)
+        # 2a. Wand penalty voor voorwaartse middellijn grens (X = -0.15)
         # Voorkomt dat de robot continu tegen het fysieke H-portaal / tegenstandergrens drukt
         x_limit_front = -0.15
         front_threshold = 0.08
@@ -290,6 +296,16 @@ class AirHockeyGymEnv(gym.Env[np.ndarray, np.ndarray]):
             reward -= (reward_profile["wall_penalty"] * 2.5) * max(0.0, front_proximity)
             if target_velocity[0] > 0.1:
                 reward -= 0.10 * (target_velocity[0] / self.MAX_MALLET_SPEED_MPS)
+
+        # 2b. Wand penalty voor achterwand / eigen doel (X = -half_length + MALLET_RADIUS_M)
+        # Voorkomt dat de robot achteruit tegen het eigen doel of mechanische eindstoppen beukt
+        x_limit_back = -half_length + self.MALLET_RADIUS_M
+        back_threshold = 0.08
+        if self._robot_position[0] < (x_limit_back + back_threshold):
+            back_proximity = ((x_limit_back + back_threshold) - self._robot_position[0]) / back_threshold
+            reward -= (reward_profile["wall_penalty"] * 2.5) * max(0.0, back_proximity)
+            if target_velocity[0] < -0.1:
+                reward -= 0.10 * (abs(target_velocity[0]) / self.MAX_MALLET_SPEED_MPS)
 
         if robot_contact and rel_vel_before > 0.8:
             impact_strength = 0.5 + min(1.0, rel_vel_before / 1.5)
