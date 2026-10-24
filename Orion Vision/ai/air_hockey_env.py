@@ -274,18 +274,42 @@ class AirHockeyGymEnv(gym.Env[np.ndarray, np.ndarray]):
         ):
             reward += 2.5 * min(1.0, self._puck_velocity[0] / 1.5)
 
+        # 1. Wand penalty voor zijwanden (Y)
         current_y_abs = abs(float(self._robot_position[1]))
         wall_threshold = 0.05
         if current_y_abs > (max_y - wall_threshold):
             proximity = (current_y_abs - (max_y - wall_threshold)) / wall_threshold
             reward -= reward_profile["wall_penalty"] * max(0.0, proximity)
 
+        # 2. Wand penalty voor voorwaartse middellijn grens (X = -0.15)
+        # Voorkomt dat de robot continu tegen het fysieke H-portaal / tegenstandergrens drukt
+        x_limit_front = -0.15
+        front_threshold = 0.08
+        if self._robot_position[0] > (x_limit_front - front_threshold):
+            front_proximity = (self._robot_position[0] - (x_limit_front - front_threshold)) / front_threshold
+            reward -= (reward_profile["wall_penalty"] * 2.5) * max(0.0, front_proximity)
+            if target_velocity[0] > 0.1:
+                reward -= 0.10 * (target_velocity[0] / self.MAX_MALLET_SPEED_MPS)
+
         if robot_contact and rel_vel_before > 0.8:
             impact_strength = 0.5 + min(1.0, rel_vel_before / 1.5)
             reward += reward_profile["robot_contact"] * impact_strength
 
-        if self._puck_position[0] >= 0.0 and self._robot_position[0] > -0.35:
-            reward -= 0.02
+        # 3. Positionering als puck op de helft van de tegenstander is
+        if self._puck_position[0] >= 0.0:
+            if self._robot_position[0] > -0.35:
+                penalty = 0.02
+                if self._robot_position[0] > -0.25:
+                    penalty += 0.08 * ((self._robot_position[0] - (-0.25)) / 0.10)
+                reward -= penalty
+            elif self._robot_position[0] < -0.50:
+                home_x = -half_length * 0.70
+                dist_to_home = abs(float(self._robot_position[0] - home_x))
+                reward += 0.03 * max(0.0, 1.0 - (dist_to_home / 0.20))
+
+        # Lichte actie-regularisatie om verzadiging op maximale snelheden te dempen
+        action_sq = float(np.sum(np.square(np.clip(action, -1.0, 1.0))))
+        reward -= 0.005 * action_sq
 
         near_back_wall = abs(float(self._robot_position[0] + half_length)) < 0.05
         near_side_wall = abs(float(self._robot_position[1])) > (max_y - 0.05)
@@ -341,11 +365,24 @@ class AirHockeyGymEnv(gym.Env[np.ndarray, np.ndarray]):
             velocity *= self.MAX_MALLET_SPEED_MPS / speed
 
         position += velocity * self.DT
-        position[0] = float(np.clip(position[0], *x_limits))
+        if position[0] <= x_limits[0]:
+            position[0] = x_limits[0]
+            if velocity[0] < 0.0:
+                velocity[0] = 0.0
+        elif position[0] >= x_limits[1]:
+            position[0] = x_limits[1]
+            if velocity[0] > 0.0:
+                velocity[0] = 0.0
+
         y_limit = self.FIELD_WIDTH_M / 2.0 - self.MALLET_RADIUS_M
-        if position[1] < -y_limit or position[1] > y_limit:
-            position[1] = float(np.clip(position[1], -y_limit, y_limit))
-            velocity[1] = 0.0
+        if position[1] <= -y_limit:
+            position[1] = -y_limit
+            if velocity[1] < 0.0:
+                velocity[1] = 0.0
+        elif position[1] >= y_limit:
+            position[1] = y_limit
+            if velocity[1] > 0.0:
+                velocity[1] = 0.0
 
     def _resolve_puck_walls(self) -> None:
         """Reflect the puck center at radius-adjusted wall positions."""

@@ -82,7 +82,30 @@ def test_robot_is_clamped_to_15_cm_before_center_line():
     env.step(np.asarray([1.0, 0.0], dtype=np.float32))
 
     assert env.robot_position_m[0] <= -0.15
+    assert env.robot_velocity_mps[0] == 0.0
     env.close()
+
+
+def test_robot_is_penalized_for_pushing_into_front_boundary():
+    pushing_env = AirHockeyGymEnv(seed=12, max_episode_steps=5, opponent_type="none")
+    pushing_env.reset(seed=13)
+    pushing_env._robot_position[:] = (-0.15, 0.0)
+    pushing_env._robot_velocity[:] = (0.0, 0.0)
+    pushing_env._puck_position[:] = (-0.4, 0.2)
+    pushing_env._puck_velocity[:] = 0.0
+    _, push_reward, _, _, _ = pushing_env.step(np.asarray([1.0, 0.0], dtype=np.float32))
+
+    neutral_env = AirHockeyGymEnv(seed=12, max_episode_steps=5, opponent_type="none")
+    neutral_env.reset(seed=13)
+    neutral_env._robot_position[:] = (-0.15, 0.0)
+    neutral_env._robot_velocity[:] = (0.0, 0.0)
+    neutral_env._puck_position[:] = (-0.4, 0.2)
+    neutral_env._puck_velocity[:] = 0.0
+    _, neutral_reward, _, _, _ = neutral_env.step(np.asarray([0.0, 0.0], dtype=np.float32))
+
+    assert push_reward < neutral_reward
+    pushing_env.close()
+    neutral_env.close()
 
 
 def test_clear_bonus_requires_active_puck_crossing():
