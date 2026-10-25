@@ -150,6 +150,12 @@ class SACTrainerWorker(QThread):
     status_changed = pyqtSignal(str)
     training_error = pyqtSignal(str)
 
+    STAGES = (
+        ("Stage 1: No Opponent", "none"),
+        ("Stage 2: Static Opponent", "static"),
+        ("Stage 3: Complex Opponent", "complex"),
+    )
+
     def __init__(
         self,
         total_timesteps: int = 500_000,
@@ -207,8 +213,31 @@ class SACTrainerWorker(QThread):
         self.model_saved.emit(str(destination))
         return str(destination)
 
+    def _make_training_env(self, opponent_type: str):
+        """Create the vectorized 12D environment for one curriculum stage."""
+        if self.n_envs > 1:
+            try:
+                return make_vec_env(
+                    AirHockeyGymEnv,
+                    n_envs=self.n_envs,
+                    vec_env_cls=SubprocVecEnv,
+                    env_kwargs={
+                        "reward_mode": self.reward_mode,
+                        "opponent_type": opponent_type,
+                    },
+                )
+            except Exception as exc:  # pragma: no cover - multiprocessing fallback
+                logger.warning(
+                    "Subprocess vectorized env failed; falling back to single env (%s)",
+                    exc,
+                )
+                self.n_envs = 1
+        return AirHockeyGymEnv(
+            reward_mode=self.reward_mode,
+            opponent_type=opponent_type,
+        )
+
     def run(self) -> None:
-        eval_env: AirHockeyGymEnv | None = None
         try:
             torch = get_torch_runtime()
             from stable_baselines3 import SAC
@@ -259,22 +288,6 @@ class SACTrainerWorker(QThread):
                         self.last_metrics_at = now
                     return True
 
-            if self.n_envs > 1:
-                try:
-                    self._env = make_vec_env(
-                        AirHockeyGymEnv,
-                        n_envs=self.n_envs,
-                        vec_env_cls=SubprocVecEnv,
-                        env_kwargs={"reward_mode": self.reward_mode},
-                    )
-                except Exception as exc:  # pragma: no cover - safety fallback for PyQt multiprocess limits
-                    logger.warning(
-                        "Subprocess vectorized env failed; falling back to single env (%s)", exc
-                    )
-                    self._env = AirHockeyGymEnv(reward_mode=self.reward_mode)
-                    self.n_envs = 1
-            else:
-                self._env = AirHockeyGymEnv(reward_mode=self.reward_mode)
             if torch.cuda.is_available():
                 device = "cuda"
                 self.device_name = torch.cuda.get_device_name(0)
@@ -284,76 +297,120 @@ class SACTrainerWorker(QThread):
                 self.device_name = "CPU fallback"
                 self.device_used = device
 
-            logger.info("Starting SAC training on %s with %d parallel envs", self.device_used, self.n_envs)
-
             project_root = Path(__file__).resolve().parents[1]
             tensorboard_log = Path(__file__).resolve().parents[1] / "sac_air_hockey_tensorboard"
-            best_model_dir = project_root / "models" / "best_model"
-            eval_log_dir = project_root / "models" / "best_model_eval_logs"
-            best_model_dir.mkdir(parents=True, exist_ok=True)
-            eval_log_dir.mkdir(parents=True, exist_ok=True)
+            output_path = self.output_path.expanduser()
+            if not output_path.is_absolute():
+                output_path = project_root / output_path
+            stage_steps = [
+                self.total_timesteps // len(self.STAGES)
+                for _ in self.STAGES
+            ]
+            stage_steps[-1] += self.total_timesteps - sum(stage_steps)
+            completed_steps = 0
 
-            eval_env = AirHockeyGymEnv(reward_mode=self.reward_mode)
-            stop_callback = StopTrainingOnNoModelImprovement(
-                max_no_improvement_evals=10,
-                min_evals=5,
-                verbose=1,
+            logger.info(
+                "Starting staged SAC training on %s with %d parallel envs",
+                self.device_used,
+                self.n_envs,
             )
-            eval_callback = EvalCallback(
-                eval_env,
-                callback_after_eval=stop_callback,
-                best_model_save_path=str(best_model_dir),
-                log_path=str(eval_log_dir),
-                eval_freq=max(10_000 // self.n_envs, 1),
-                n_eval_episodes=10,
-                deterministic=True,
-                render=False,
-                verbose=1,
-            )
-            self._model = SAC(
-                "MlpPolicy",
-                self._env,
-                learning_rate=linear_schedule(self.learning_rate, 1e-5), # Expliciet 1e-5 als eindwaarde
-                batch_size=1024,
-                gamma=0.98,
-                tau=0.001,
-                buffer_size=self.buffer_size,
-                verbose=0,
-                device=device,
-                tensorboard_log=str(tensorboard_log),
-            )
-            
             self.status_changed.emit(f"Training running on {self.device_used}")
-            self._model.learn(
-                total_timesteps=self.total_timesteps,
-                tb_log_name=f"SAC_{self.reward_mode}",
-                callback=CallbackList(
+
+            for stage_index, ((stage_label, opponent_type), stage_total) in enumerate(
+                zip(self.STAGES, stage_steps)
+            ):
+                if self._stop_event.is_set():
+                    break
+                self.status_changed.emit(f"{stage_label} running")
+                self._env = self._make_training_env(opponent_type)
+                eval_env = AirHockeyGymEnv(
+                    reward_mode=self.reward_mode,
+                    opponent_type=opponent_type,
+                )
+                best_model_dir = project_root / "models" / f"best_sac_stage{stage_index + 1}"
+                eval_log_dir = project_root / "models" / "sac_eval_logs" / f"stage{stage_index + 1}"
+                best_model_dir.mkdir(parents=True, exist_ok=True)
+                eval_log_dir.mkdir(parents=True, exist_ok=True)
+                stop_callback = StopTrainingOnNoModelImprovement(
+                    max_no_improvement_evals=10,
+                    min_evals=5,
+                    verbose=1,
+                )
+                eval_callback = EvalCallback(
+                    eval_env,
+                    callback_after_eval=stop_callback,
+                    best_model_save_path=str(best_model_dir),
+                    log_path=str(eval_log_dir),
+                    eval_freq=max(10_000 // self.n_envs, 1),
+                    n_eval_episodes=10,
+                    deterministic=True,
+                    render=False,
+                    verbose=1,
+                )
+                if self._model is None:
+                    self._model = SAC(
+                        "MlpPolicy",
+                        self._env,
+                        learning_rate=linear_schedule(self.learning_rate, 1e-5),
+                        batch_size=256,
+                        gamma=0.99,
+                        tau=0.001,
+                        buffer_size=self.buffer_size,
+                        learning_starts=10_000,
+                        ent_coef="auto",
+                        verbose=0,
+                        device=device,
+                        tensorboard_log=str(tensorboard_log),
+                    )
+                else:
+                    self._model.set_env(self._env)
+
+                stage_start = int(self._model.num_timesteps)
+                callback = CallbackList(
                     [QtTrainingCallback(), AirHockeyMetricsCallback(), eval_callback]
-                ),
-                progress_bar=False,
+                )
+                try:
+                    self._model.learn(
+                        total_timesteps=stage_total,
+                        reset_num_timesteps=False,
+                        tb_log_name=f"SAC_{self.reward_mode}_stage{stage_index + 1}",
+                        callback=callback,
+                        progress_bar=False,
+                    )
+                finally:
+                    eval_env.close()
+                    self._env.close()
+                    self._env = None
+
+                completed_steps += max(0, int(self._model.num_timesteps) - stage_start)
+                self.progress_changed.emit(
+                    min(completed_steps, self.total_timesteps),
+                    self.total_timesteps,
+                )
+                stage_output = output_path.with_name(
+                    f"{output_path.stem}_stage{stage_index + 1}.zip"
+                ) if stage_index < len(self.STAGES) - 1 else output_path
+                saved_path = self._save_current_model(stage_output)
+                if stage_index == len(self.STAGES) - 1:
+                    self.model_saved.emit(str(saved_path))
+
+            self._saved_path = output_path
+            self.status_changed.emit(
+                "Curriculum stopped and model saved"
+                if self._stop_event.is_set()
+                else "Curriculum training complete"
             )
-            self.progress_changed.emit(
-                min(int(self._model.num_timesteps), self.total_timesteps),
-                self.total_timesteps,
-            )
-            saved_path = self._save_current_model()
-            self._saved_path = saved_path
-            self.model_saved.emit(str(saved_path))
-            self.status_changed.emit("Training stopped and model saved")
         except Exception as exc:
             self.training_error.emit(f"Training failed: {type(exc).__name__}: {exc}")
             self.status_changed.emit("Training failed")
-        finally:
-            if eval_env is not None:
-                eval_env.close()
             if self._env is not None:
                 self._env.close()
                 self._env = None
 
-    def _save_current_model(self) -> Path:
+    def _save_current_model(self, output_path: str | Path | None = None) -> Path:
         if self._model is None:
             raise RuntimeError("No SAC model is available to save")
-        destination = self.output_path.expanduser()
+        destination = Path(output_path or self.output_path).expanduser()
         if not destination.is_absolute():
             destination = Path(__file__).resolve().parents[1] / destination
         if destination.suffix.lower() != ".zip":
@@ -470,16 +527,24 @@ class PPOCurriculumWorker(QThread):
                         self.last_metrics_at = time.perf_counter()
 
                 callback = DashboardCallback()
-                self._model = train_stage(
-                    opponent_type=opponent_type,
-                    total_timesteps=stage_steps,
-                    save_name=str(stage_output_path),
-                    previous_model_path=previous_checkpoint,
-                    stage_name=run_name,
-                    seed=42,
-                    reward_mode=reward_mode,
-                    callback=callback,
-                )
+                try:
+                    self._model = train_stage(
+                        opponent_type=opponent_type,
+                        total_timesteps=stage_steps,
+                        save_name=str(stage_output_path),
+                        previous_model_path=previous_checkpoint,
+                        stage_name=run_name,
+                        seed=42,
+                        reward_mode=reward_mode,
+                        callback=callback,
+                    )
+                except Exception as exc:
+                    logger.exception("PPO training failed in %s", stage_label)
+                    self.training_error.emit(
+                        f"{stage_label} failed: {type(exc).__name__}: {exc}"
+                    )
+                    self.status_changed.emit("Training failed")
+                    return
                 completed_steps += min(stage_steps, max(0, int(self._model.num_timesteps) - stage_start))
                 self.progress_changed.emit(min(completed_steps, self.total_timesteps), self.total_timesteps)
                 previous_checkpoint = str(stage_output_path)

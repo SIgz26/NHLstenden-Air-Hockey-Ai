@@ -70,11 +70,28 @@ def train_stage(
     best_model_dir = model_path.parent / f"best_{model_path.stem}"
     best_model_dir.mkdir(parents=True, exist_ok=True)
 
+    model = None
+    expected_observation_shape = env.observation_space.shape
     if previous_model_path and Path(previous_model_path).exists():
-        model = PPO.load(str(previous_model_path), env=env)
-        model.set_env(env)
-        model.tensorboard_log = TENSORBOARD_LOG
-    else:
+        checkpoint_path = Path(previous_model_path)
+        try:
+            candidate = PPO.load(str(checkpoint_path), device="auto")
+            candidate_shape = getattr(candidate.observation_space, "shape", None)
+            if candidate_shape != expected_observation_shape:
+                logger.warning(
+                    "Ignoring incompatible PPO checkpoint %s: observation shape %s, expected %s",
+                    checkpoint_path,
+                    candidate_shape,
+                    expected_observation_shape,
+                )
+            else:
+                candidate.set_env(env)
+                candidate.tensorboard_log = TENSORBOARD_LOG
+                model = candidate
+        except Exception:
+            logger.exception("Could not load compatible PPO checkpoint %s; starting a fresh model", checkpoint_path)
+
+    if model is None:
         model = PPO(
             "MlpPolicy",
             env,
@@ -84,7 +101,8 @@ def train_stage(
             gamma=0.99,
             gae_lambda=0.95,
             clip_range=0.2,
-            ent_coef=0.02,
+            ent_coef=0.01,
+            policy_kwargs=dict(net_arch=dict(pi=[256, 256], vf=[256, 256])),
             vf_coef=0.5,
             max_grad_norm=0.5,
             verbose=1,
@@ -119,12 +137,16 @@ def train_stage(
     callbacks.append(eval_callback)
 
     try:
-        model.learn(
-            total_timesteps=total_timesteps,
-            reset_num_timesteps=False,
-            tb_log_name=stage_name,
-            callback=CallbackList(callbacks),
-        )
+        try:
+            model.learn(
+                total_timesteps=total_timesteps,
+                reset_num_timesteps=False,
+                tb_log_name=stage_name,
+                callback=CallbackList(callbacks),
+            )
+        except Exception:
+            logger.exception("PPO training failed for stage %s", stage_name)
+            raise
 
         # Laad het best presterende model op in plaats van het (mogelijk gedegradeerde) laatste model
         best_checkpoint = best_model_dir / "best_model.zip"

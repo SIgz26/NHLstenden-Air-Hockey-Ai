@@ -20,8 +20,9 @@ class DigitalTwinWidget(QWidget):
     caches a copy of the latest vector, and schedules a lightweight repaint.
     The camera worker is never called from ``paintEvent``.
 
-    Observation order is ``[puck_x, puck_y, puck_vx, puck_vy, opp_x, opp_y,
-    robot_x, robot_y]`` with normalized values in the range ``[-1, 1]``.
+    Observation order starts with ``[puck_x, puck_y, puck_vx, puck_vy, opp_x,
+    opp_y, robot_x, robot_y]`` and may include the four 12D relative-state
+    values. All values are normalized to the range ``[-1, 1]``.
     """
 
     FIELD_ASPECT_RATIO = 1.8
@@ -39,7 +40,7 @@ class DigitalTwinWidget(QWidget):
         super().__init__(parent)
         self._sim_bridge: SimBridge | None = None
         self._external_observation = False
-        self._observation = np.zeros(8, dtype=np.float32)
+        self._observation = np.zeros(12, dtype=np.float32)
         self._sac_action: tuple[float, float] | None = None
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._refresh_observation)
@@ -60,13 +61,13 @@ class DigitalTwinWidget(QWidget):
         self._sim_bridge = sim_bridge
         self._external_observation = False
         if sim_bridge is None:
-            self._observation = np.zeros(8, dtype=np.float32)
+            self._observation = np.zeros(12, dtype=np.float32)
         self._refresh_observation()
 
     def update_observation_vector(self, observation: np.ndarray) -> None:
         """Set an already-normalized observation, for simulated previews."""
         vector = np.asarray(observation, dtype=np.float32).reshape(-1)
-        if vector.shape == (8,) and np.isfinite(vector).all():
+        if vector.shape in {(8,), (12,)} and np.isfinite(vector).all():
             self._external_observation = True
             self._observation = vector.copy()
             self.update()
@@ -176,12 +177,12 @@ class DigitalTwinWidget(QWidget):
     def _refresh_observation(self) -> None:
         if self._sim_bridge is None:
             if not self._external_observation:
-                self._observation = np.zeros(8, dtype=np.float32)
+                self._observation = np.zeros(12, dtype=np.float32)
         else:
             observation = np.asarray(
                 self._sim_bridge.get_observation_vector(), dtype=np.float32
             ).reshape(-1)
-            if observation.size == 8 and np.all(np.isfinite(observation)):
+            if observation.size in (8, 12) and np.all(np.isfinite(observation)):
                 self._observation = observation.copy()
         self.update()
 

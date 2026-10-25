@@ -25,13 +25,16 @@ class StaticOpponent:
 
 
 class AirHockeyGymEnv(gym.Env[np.ndarray, np.ndarray]):
-    """Air-hockey physics with an 8D normalized SimBridge observation.
+    """Air-hockey physics with a 12D normalized SimBridge observation.
 
     State order is ``[puck_x, puck_y, puck_vx, puck_vy, opponent_x,
-    opponent_y, robot_x, robot_y]``. Internally, positions use meters and
-    velocities use m/s. Observation positions are normalized by field
-    half-dimensions and puck speeds by ``MAX_PUCK_SPEED_MPS``. Actions request
-    normalized target velocity for the robot mallet.
+    opponent_y, robot_x, robot_y, rel_x, rel_y, rel_vx, rel_vy]``, where the
+    relative values describe the puck relative to the robot mallet. Internally,
+    positions use meters and velocities use m/s. Observation positions are
+    normalized by field half-dimensions, relative positions by the full field
+    dimensions, puck speeds by ``MAX_PUCK_SPEED_MPS``, and relative speeds by
+    the maximum combined puck and mallet speed. Actions request normalized
+    target velocity for the robot mallet.
     """
 
     REWARD_MODES = ("aggressive", "balanced", "defensive")
@@ -48,6 +51,7 @@ class AirHockeyGymEnv(gym.Env[np.ndarray, np.ndarray]):
     MAX_MALLET_ACCELERATION_MPS2 = 12.0
     MAX_MALLET_SPEED_MPS = 2.5
     MAX_PUCK_SPEED_MPS = 5.0
+    MAX_RELATIVE_SPEED_MPS = MAX_PUCK_SPEED_MPS + MAX_MALLET_SPEED_MPS
     PUCK_AIR_FRICTION = 0.005
     GOAL_WIDTH_M = 0.30
     DT = 1.0 / 120.0
@@ -71,7 +75,7 @@ class AirHockeyGymEnv(gym.Env[np.ndarray, np.ndarray]):
         if puck_start_side not in ("robot", "opponent"):
             raise ValueError("puck_start_side must be 'robot' or 'opponent'")
         self.puck_start_side = puck_start_side
-        self.observation_space = spaces.Box(-1.0, 1.0, shape=(8,), dtype=np.float32)
+        self.observation_space = spaces.Box(-1.0, 1.0, shape=(12,), dtype=np.float32)
         self.action_space = spaces.Box(-1.0, 1.0, shape=(2,), dtype=np.float32)
         self.max_episode_steps = int(max_episode_steps)
         self._rng = np.random.default_rng(seed)
@@ -84,7 +88,7 @@ class AirHockeyGymEnv(gym.Env[np.ndarray, np.ndarray]):
         self._steps = 0
         self._episode_return = 0.0
         self._previous_robot_puck_distance = 0.0
-        self._observation = np.zeros(8, dtype=np.float32)
+        self._observation = np.zeros(12, dtype=np.float32)
         self.opponent = self._build_opponent(self.opponent_type)
 
     @staticmethod
@@ -223,32 +227,32 @@ class AirHockeyGymEnv(gym.Env[np.ndarray, np.ndarray]):
         reward_profile = {
             "aggressive": {
                 "base": -0.01,
-                "clear_bonus": 2.0,
-                "robot_contact": 1.8,
-                "goal_for": 25.0,
-                "goal_against": -25.0,
+                "clear_bonus": 1.0,
+                "robot_contact": 0.6,
+                "goal_for": 50.0,
+                "goal_against": -50.0,
                 "wall_penalty": 0.05,
-                "defensive_alignment": 0.08,
+                "defensive_alignment": 0.02,
                 "opponent_contact_penalty": 0.10,
             },
             "balanced": {
                 "base": -0.01,
-                "clear_bonus": 2.0,
-                "robot_contact": 1.6,
-                "goal_for": 25.0,
-                "goal_against": -25.0,
+                "clear_bonus": 1.0,
+                "robot_contact": 0.5,
+                "goal_for": 50.0,
+                "goal_against": -50.0,
                 "wall_penalty": 0.05,
-                "defensive_alignment": 0.06,
+                "defensive_alignment": 0.015,
                 "opponent_contact_penalty": 0.10,
             },
             "defensive": {
                 "base": -0.01,
-                "clear_bonus": 2.0,
-                "robot_contact": 1.4,
-                "goal_for": 25.0,
-                "goal_against": -25.0,
+                "clear_bonus": 1.0,
+                "robot_contact": 0.4,
+                "goal_for": 50.0,
+                "goal_against": -50.0,
                 "wall_penalty": 0.05,
-                "defensive_alignment": 0.10,
+                "defensive_alignment": 0.025,
                 "opponent_contact_penalty": 0.10,
             },
         }[self.reward_mode]
@@ -463,6 +467,8 @@ class AirHockeyGymEnv(gym.Env[np.ndarray, np.ndarray]):
         """Normalize SI state to the SimBridge-compatible [-1, 1] vector."""
         half_length = self.FIELD_LENGTH_M / 2.0
         half_width = self.FIELD_WIDTH_M / 2.0
+        relative_position = self._puck_position - self._robot_position
+        relative_velocity = self._puck_velocity - self._robot_velocity
         observation = np.asarray(
             [
                 self._puck_position[0] / half_length,
@@ -473,6 +479,10 @@ class AirHockeyGymEnv(gym.Env[np.ndarray, np.ndarray]):
                 self._opponent_position[1] / half_width,
                 self._robot_position[0] / half_length,
                 self._robot_position[1] / half_width,
+                relative_position[0] / self.FIELD_LENGTH_M,
+                relative_position[1] / self.FIELD_WIDTH_M,
+                relative_velocity[0] / self.MAX_RELATIVE_SPEED_MPS,
+                relative_velocity[1] / self.MAX_RELATIVE_SPEED_MPS,
             ],
             dtype=np.float32,
         )

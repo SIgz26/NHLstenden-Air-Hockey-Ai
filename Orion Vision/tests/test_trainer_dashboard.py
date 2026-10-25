@@ -27,15 +27,15 @@ def test_air_hockey_env_observation_action_and_step_contract():
     env = AirHockeyGymEnv(seed=7, max_episode_steps=10)
     observation, _ = env.reset(seed=11)
 
-    assert observation.shape == (8,)
-    assert env.observation_space.shape == (8,)
+    assert observation.shape == (12,)
+    assert env.observation_space.shape == (12,)
     assert env.action_space.shape == (2,)
     assert np.all(observation >= -1.0) and np.all(observation <= 1.0)
 
     next_observation, reward, terminated, truncated, info = env.step(
         np.asarray([0.2, -0.3], dtype=np.float32)
     )
-    assert next_observation.shape == (8,)
+    assert next_observation.shape == (12,)
     assert np.isfinite(reward)
     assert isinstance(terminated, bool)
     assert isinstance(truncated, bool)
@@ -535,7 +535,7 @@ app.processEvents()
 assert not errors, '; '.join(errors)
 assert progress, 'no progress signals were emitted'
 assert progress[-1][1] == 100
-assert observations and len(observations[-1]) == 8
+assert observations and len(observations[-1]) == 12
 assert saved == [{str(output)!r}]
 expected_device = 'cuda' if torch.cuda.is_available() else 'cpu'
 assert worker._model.device.type == expected_device
