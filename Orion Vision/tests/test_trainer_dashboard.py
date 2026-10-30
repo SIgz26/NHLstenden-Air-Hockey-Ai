@@ -27,15 +27,15 @@ def test_air_hockey_env_observation_action_and_step_contract():
     env = AirHockeyGymEnv(seed=7, max_episode_steps=10)
     observation, _ = env.reset(seed=11)
 
-    assert observation.shape == (8,)
-    assert env.observation_space.shape == (8,)
+    assert observation.shape == (12,)
+    assert env.observation_space.shape == (12,)
     assert env.action_space.shape == (2,)
     assert np.all(observation >= -1.0) and np.all(observation <= 1.0)
 
     next_observation, reward, terminated, truncated, info = env.step(
         np.asarray([0.2, -0.3], dtype=np.float32)
     )
-    assert next_observation.shape == (8,)
+    assert next_observation.shape == (12,)
     assert np.isfinite(reward)
     assert isinstance(terminated, bool)
     assert isinstance(truncated, bool)
@@ -82,7 +82,76 @@ def test_robot_is_clamped_to_15_cm_before_center_line():
     env.step(np.asarray([1.0, 0.0], dtype=np.float32))
 
     assert env.robot_position_m[0] <= -0.15
+    assert env.robot_velocity_mps[0] == 0.0
     env.close()
+
+
+def test_robot_is_penalized_for_pushing_into_front_boundary():
+    pushing_env = AirHockeyGymEnv(seed=12, max_episode_steps=5, opponent_type="none")
+    pushing_env.reset(seed=13)
+    pushing_env._robot_position[:] = (-0.15, 0.0)
+    pushing_env._robot_velocity[:] = (0.0, 0.0)
+    pushing_env._puck_position[:] = (-0.4, 0.2)
+    pushing_env._puck_velocity[:] = 0.0
+    _, push_reward, _, _, _ = pushing_env.step(np.asarray([1.0, 0.0], dtype=np.float32))
+
+    neutral_env = AirHockeyGymEnv(seed=12, max_episode_steps=5, opponent_type="none")
+    neutral_env.reset(seed=13)
+    neutral_env._robot_position[:] = (-0.15, 0.0)
+    neutral_env._robot_velocity[:] = (0.0, 0.0)
+    neutral_env._puck_position[:] = (-0.4, 0.2)
+    neutral_env._puck_velocity[:] = 0.0
+    _, neutral_reward, _, _, _ = neutral_env.step(np.asarray([0.0, 0.0], dtype=np.float32))
+
+    assert push_reward < neutral_reward
+    pushing_env.close()
+    neutral_env.close()
+
+
+def test_robot_is_penalized_for_pushing_into_back_boundary():
+    back_limit = -AirHockeyGymEnv.FIELD_LENGTH_M / 2.0 + AirHockeyGymEnv.MALLET_RADIUS_M
+    pushing_env = AirHockeyGymEnv(seed=12, max_episode_steps=5, opponent_type="none")
+    pushing_env.reset(seed=13)
+    pushing_env._robot_position[:] = (back_limit, 0.0)
+    pushing_env._robot_velocity[:] = (0.0, 0.0)
+    pushing_env._puck_position[:] = (-0.4, 0.2)
+    pushing_env._puck_velocity[:] = 0.0
+    _, push_reward, _, _, _ = pushing_env.step(np.asarray([-1.0, 0.0], dtype=np.float32))
+
+    neutral_env = AirHockeyGymEnv(seed=12, max_episode_steps=5, opponent_type="none")
+    neutral_env.reset(seed=13)
+    neutral_env._robot_position[:] = (back_limit, 0.0)
+    neutral_env._robot_velocity[:] = (0.0, 0.0)
+    neutral_env._puck_position[:] = (-0.4, 0.2)
+    neutral_env._puck_velocity[:] = 0.0
+    _, neutral_reward, _, _, _ = neutral_env.step(np.asarray([0.0, 0.0], dtype=np.float32))
+
+    assert push_reward < neutral_reward
+    pushing_env.close()
+    neutral_env.close()
+
+
+def test_robot_is_penalized_for_pushing_into_y_side_boundary():
+    y_limit = AirHockeyGymEnv.FIELD_WIDTH_M / 2.0 - AirHockeyGymEnv.MALLET_RADIUS_M
+    pushing_env = AirHockeyGymEnv(seed=12, max_episode_steps=5, opponent_type="none")
+    pushing_env.reset(seed=13)
+    pushing_env._robot_position[:] = (-0.50, y_limit)
+    pushing_env._robot_velocity[:] = (0.0, 0.0)
+    pushing_env._puck_position[:] = (-0.4, 0.2)
+    pushing_env._puck_velocity[:] = 0.0
+    _, push_reward, _, _, _ = pushing_env.step(np.asarray([0.0, 1.0], dtype=np.float32))
+
+    neutral_env = AirHockeyGymEnv(seed=12, max_episode_steps=5, opponent_type="none")
+    neutral_env.reset(seed=13)
+    neutral_env._robot_position[:] = (-0.50, y_limit)
+    neutral_env._robot_velocity[:] = (0.0, 0.0)
+    neutral_env._puck_position[:] = (-0.4, 0.2)
+    neutral_env._puck_velocity[:] = 0.0
+    _, neutral_reward, _, _, _ = neutral_env.step(np.asarray([0.0, 0.0], dtype=np.float32))
+
+    assert push_reward < neutral_reward
+    pushing_env.close()
+    neutral_env.close()
 
 
 def test_clear_bonus_requires_active_puck_crossing():
@@ -466,7 +535,7 @@ app.processEvents()
 assert not errors, '; '.join(errors)
 assert progress, 'no progress signals were emitted'
 assert progress[-1][1] == 100
-assert observations and len(observations[-1]) == 8
+assert observations and len(observations[-1]) == 12
 assert saved == [{str(output)!r}]
 expected_device = 'cuda' if torch.cuda.is_available() else 'cpu'
 assert worker._model.device.type == expected_device
@@ -519,3 +588,41 @@ def test_launch_builder_button_requests_trainer_module():
     assert requested_modules == ["ai_trainer"]
     menu.close()
     app.processEvents()
+
+
+def test_train_stage_configures_eval_callback_and_best_model_directory(monkeypatch, tmp_path):
+    import ai.train_curriculum as tc
+
+    captured_callbacks = []
+    fake_model_saved = []
+
+    class DummyPPO:
+        def __init__(self, *args, **kwargs):
+            self.tensorboard_log = None
+            self.num_timesteps = 50
+
+        def learn(self, total_timesteps=None, callback=None, **kwargs):
+            captured_callbacks.append(callback)
+            return self
+
+        def save(self, path):
+            fake_model_saved.append(path)
+
+    monkeypatch.setattr(tc, "PPO", DummyPPO)
+
+    output = tmp_path / "models" / "stage_test.zip"
+    model = tc.train_stage(
+        opponent_type="none",
+        total_timesteps=50,
+        save_name=output,
+        eval_freq=25,
+        early_stop_patience=3,
+    )
+
+    best_dir = tmp_path / "models" / "best_stage_test"
+    assert best_dir.is_dir()
+    assert fake_model_saved == [str(output)]
+    assert len(captured_callbacks) == 1
+    # Check that EvalCallback is in the callback list
+    callbacks = getattr(captured_callbacks[0], "callbacks", [])
+    assert any(isinstance(cb, tc.EvalCallback) for cb in callbacks)

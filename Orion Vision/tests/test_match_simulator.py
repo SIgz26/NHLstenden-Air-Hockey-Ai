@@ -42,6 +42,19 @@ def test_right_player_observation_and_action_mirroring_are_consistent():
     )
 
 
+def test_right_player_mirroring_preserves_12d_observation_shape():
+    observation = np.asarray(
+        [0.3, -0.2, 0.4, 0.5, 0.8, 0.1, -0.7, -0.1, 1.0, -0.1, -0.2, 0.3],
+        dtype=np.float32,
+    )
+
+    mirrored = mirror_observation_for_right_player(observation)
+    restored = mirror_observation_for_right_player(mirrored)
+
+    assert mirrored.shape == (12,)
+    np.testing.assert_allclose(restored, observation)
+
+
 def test_ai_vs_ai_steps_both_policies_and_keeps_mallets_on_their_sides(monkeypatch):
     class DummyModel:
         def __init__(self, action):

@@ -18,11 +18,22 @@ MATCH_MODES = (HUMAN_VS_AI, AI_VS_AI, AI_VS_SCRIPTED)
 
 def mirror_observation_for_right_player(observation: np.ndarray) -> np.ndarray:
     """Mirror an observation so a left-side policy can control the right side."""
-    state = np.asarray(observation, dtype=np.float32).reshape(8)
+    state = np.asarray(observation, dtype=np.float32).reshape(-1)
+    if state.size == 8:
+        return np.asarray(
+            [
+                -state[0], state[1], -state[2], state[3],
+                -state[6], state[7], -state[4], state[5],
+            ],
+            dtype=np.float32,
+        )
+    if state.size != 12:
+        raise ValueError("observation must contain 8 or 12 values")
     return np.asarray(
         [
             -state[0], state[1], -state[2], state[3],
             -state[6], state[7], -state[4], state[5],
+            state[4] - state[0], state[1] - state[5], -state[10], state[11],
         ],
         dtype=np.float32,
     )
@@ -65,17 +76,25 @@ def mouse_position_to_world(
 
 
 def load_policy(model_path: str | Path) -> Any:
-    """Load an SB3 PPO or SAC archive."""
+    """Load an SB3 policy whose observation space matches the 12D environment."""
     path = Path(model_path).expanduser()
-    try:
-        return PPO.load(str(path), device="auto")
-    except Exception as ppo_error:
+    load_errors = []
+    for policy_type in (PPO, SAC):
         try:
-            return SAC.load(str(path), device="auto")
-        except Exception as sac_error:
-            raise ValueError(
-                f"Could not load model archive '{path}' as PPO or SAC: {sac_error}"
-            ) from ppo_error
+            model = policy_type.load(str(path), device="auto")
+            observation_shape = getattr(model.observation_space, "shape", None)
+            if observation_shape != (12,):
+                raise ValueError(
+                    f"model uses observation shape {observation_shape}; expected (12,)"
+                )
+            return model
+        except Exception as exc:
+            load_errors.append(f"{policy_type.__name__}: {exc}")
+
+    raise ValueError(
+        f"Could not load a compatible 12D PPO/SAC model '{path}': "
+        + " | ".join(load_errors)
+    )
 
 
 class MatchSimulator:
