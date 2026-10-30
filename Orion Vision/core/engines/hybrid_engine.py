@@ -1,4 +1,4 @@
-import sys
+W sys
 from pathlib import Path
 
 # Zorg dat de hoofdmap (Orion Vision) in het zoekpad staat
@@ -242,8 +242,12 @@ if __name__ == "__main__":
     print("Standalone test van HybridEngine met aangepaste muren gestart...")
     engine = HybridEngine()
     
-    video_pad = r"C:\Users\timoz\Documents\00.school\appilicatie\NHLstenden-Air-Hockey-Ai\Orion Vision\dataset02\realtime_30fps_potje01.mov"
-    cap = cv2.VideoCapture(video_pad)
+    video_path = (
+        Path(__file__).resolve().parents[2]
+        / "dataset02"
+        / "realtime_30fps_potje01.mov"
+    )
+    cap = cv2.VideoCapture(str(video_path))
 
     if not cap.isOpened():
         print("Kan video niet openen.")

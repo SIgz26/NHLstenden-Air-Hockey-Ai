@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
+from importlib import import_module
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-import numpy as np
+try:
+    np: Any = import_module("numpy")
+except Exception as exc:
+    np = None
+    _NUMPY_IMPORT_ERROR: Exception | None = exc
+else:
+    _NUMPY_IMPORT_ERROR = None
 
 if TYPE_CHECKING:
     from core.sim_bridge import SimBridge
@@ -115,6 +122,10 @@ class LiveSACController:
         """
         if self.model is None:
             raise RuntimeError("No SAC model is loaded")
+        if np is None:
+            raise RuntimeError(
+                f"NumPy could not initialize; SAC inference is unavailable: {_NUMPY_IMPORT_ERROR}"
+            ) from _NUMPY_IMPORT_ERROR
 
         observation = np.asarray(
             self.sim_bridge.get_observation_vector(), dtype=np.float32

@@ -1,6 +1,8 @@
 import os
+import sys
 import time
 from datetime import datetime
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -134,14 +136,24 @@ class LiveCameraWorker(QThread):
     def get_available_cameras(max_checks: int = 5) -> list[int]:
         """Return indices of cameras that can deliver at least one frame."""
         available: list[int] = []
+        if sys.platform.startswith("linux"):
+            camera_indices = sorted(
+                {
+                    int(device.name.removeprefix("video"))
+                    for device in Path("/dev").glob("video[0-9]*")
+                    if device.name.removeprefix("video").isdigit()
+                }
+            )[:max_checks]
+        else:
+            camera_indices = list(range(max_checks))
 
         # Suppress noisy OpenCV backend messages during probing
         old_level = cv2.getLogLevel() if hasattr(cv2, "getLogLevel") else None
         if hasattr(cv2, "setLogLevel"):
             cv2.setLogLevel(0)
 
-        backend = cv2.CAP_DSHOW if os.name == "nt" else cv2.CAP_ANY
-        for i in range(max_checks):
+        backend = LiveCameraWorker._camera_backend()
+        for i in camera_indices:
             cap = cv2.VideoCapture(i, backend)
             try:
                 if cap.isOpened():
@@ -155,6 +167,14 @@ class LiveCameraWorker(QThread):
             cv2.setLogLevel(old_level)
 
         return available
+
+    @staticmethod
+    def _camera_backend() -> int:
+        if os.name == "nt":
+            return cv2.CAP_DSHOW
+        if sys.platform.startswith("linux"):
+            return cv2.CAP_V4L2
+        return cv2.CAP_ANY
 
     def _normalize_engine_name(self, engine_name: str) -> str:
         raw = str(engine_name).strip().lower()
@@ -313,9 +333,7 @@ class LiveCameraWorker(QThread):
     # ------------------------------------------------------------------
 
     def run(self) -> None:
-        # Use platform-native backend to avoid backend warnings on Windows
-        backend = cv2.CAP_DSHOW if os.name == "nt" else cv2.CAP_ANY
-        cap = cv2.VideoCapture(self.camera_index, backend)
+        cap = cv2.VideoCapture(self.camera_index, self._camera_backend())
 
         if not cap.isOpened():
             self.status_signal.emit(

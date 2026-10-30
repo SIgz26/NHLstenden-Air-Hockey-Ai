@@ -1,0 +1,13 @@
+gymnasium
+matplotlib
+numpy
+numpy
+opencv-contrib-python
+pandas
+PyQt5
+pytest
+seaborn
+stable-baselines3
+tensorboard
+torch
+vmbpy
