@@ -1,7 +1,7 @@
 #
-#versie: BETA 1.2.2
+#versie: BETA 1.2.2 linux
 #door: Timo Zylstra
-#datum: 09-10-2026
+#datum: 30-10-2026
 #
 import PyQt5    
 import os

@@ -1,4 +1,4 @@
-W sys
+import sys
 from pathlib import Path
 
 # Zorg dat de hoofdmap (Orion Vision) in het zoekpad staat
