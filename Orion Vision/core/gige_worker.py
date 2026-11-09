@@ -360,15 +360,15 @@ class GigECameraWorker(QThread):
         """
         # Auto exposure
         try:
-            cam.ExposureAuto.set("Continuous")
-            self.status_signal.emit("GigE | Auto exposure: Continuous")
+            cam.ExposureAuto.set("Off")
+            self.status_signal.emit("GigE | Auto exposure: Off")
         except Exception:
             self.status_signal.emit("GigE | Auto exposure niet beschikbaar")
 
         # Auto white balance
         try:
-            cam.BalanceWhiteAuto.set("Continuous")
-            self.status_signal.emit("GigE | Auto white balance: Continuous")
+            cam.BalanceWhiteAuto.set("Off")
+            self.status_signal.emit("GigE | Auto white balance: Off")
         except Exception:
             pass
 

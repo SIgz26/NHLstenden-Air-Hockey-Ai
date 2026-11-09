@@ -1,0 +1,22 @@
+[project]
+name = "orion-vision"
+version = "0.1.0"
+requires-python = ">=3.13"
+dependencies = [
+    "gymnasium",
+    "matplotlib",
+    "numpy",
+    "opencv-contrib-python>=5.0.0.93",
+    "pandas",
+    "pyqt5>=5.15.11",
+    "seaborn",
+    "stable-baselines3>=2.9.0",
+    "tensorboard",
+    "torch>=2.14.1",
+    "vmbpy>=1.2.3",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest",
+]

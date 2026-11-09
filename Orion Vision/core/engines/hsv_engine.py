@@ -195,11 +195,15 @@ if __name__ == "__main__":
     
     # Kies hier of je de dataset video wilt testen (True) of de webcam (False)
     gebruik_dataset_video = True
-    video_pad = r"C:\Users\timoz\Documents\00.school\appilicatie\NHLstenden-Air-Hockey-Ai\Orion Vision\dataset02\realtime_30fps_potje01.mov"
+    video_path = (
+        Path(__file__).resolve().parents[2]
+        / "dataset02"
+        / "realtime_30fps_potje01.mov"
+    )
 
     if gebruik_dataset_video:
-        print(f"Video laden vanuit dataset: {video_pad}")
-        cap = cv2.VideoCapture(video_pad)
+        print(f"Video laden vanuit dataset: {video_path}")
+        cap = cv2.VideoCapture(str(video_path))
     else:
         print("Verbinden met webcam 0...")
         cap = cv2.VideoCapture(0)

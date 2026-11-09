@@ -1,2 +1,10 @@
+<<<<<<< HEAD
 __pycache__/
 *.py[cod]
+=======
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+__pycache__/
+>>>>>>> 7f412e652bf993fba250d1528978e6d38197da37

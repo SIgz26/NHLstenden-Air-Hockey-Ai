@@ -197,9 +197,13 @@ if __name__ == "__main__":
     print("Standalone test van BackgroundSubtractionEngine gestart...")
     engine = BackgroundSubtractionEngine()
     
-    video_pad = r"C:\Users\timoz\Documents\00.school\appilicatie\NHLstenden-Air-Hockey-Ai\Orion Vision\dataset02\realtime_30fps_potje01.mov"
-    print(f"Video laden vanuit dataset: {video_pad}")
-    cap = cv2.VideoCapture(video_pad)
+    video_path = (
+        Path(__file__).resolve().parents[2]
+        / "dataset02"
+        / "realtime_30fps_potje01.mov"
+    )
+    print(f"Video laden vanuit dataset: {video_path}")
+    cap = cv2.VideoCapture(str(video_path))
 
     if not cap.isOpened():
         print("Waarschuwing: Kan video niet openen.")
