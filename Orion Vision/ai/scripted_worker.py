@@ -90,35 +90,12 @@ class ScriptedOpponentWorker(QThread):
         ):
             return 0.0, 0.0
 
-        observation = self.sim_bridge.get_observation_vector()
-        if observation.shape != (8,) or not np.isfinite(observation).all():
-            raise ValueError("SimBridge must provide a finite 8D observation")
-
-        field_length_mm = (
-            self.sim_bridge.table_y_max - self.sim_bridge.table_y_min
-        )
-        field_width_mm = (
-            self.sim_bridge.table_x_max - self.sim_bridge.table_x_min
-        )
-        half_length_m = field_length_mm / 2000.0
-        half_width_m = field_width_mm / 2000.0
-
-        # Opponent policies use x for table depth and y for table width.
-        puck_pos_m = np.asarray(
-            [observation[1] * half_length_m, observation[0] * half_width_m],
-            dtype=np.float64,
-        )
-        puck_vel_mps = np.asarray(
-            [
-                observation[3] * half_length_m / self.sim_bridge.sim_dt,
-                observation[2] * half_width_m / self.sim_bridge.sim_dt,
-            ],
-            dtype=np.float64,
-        )
-        mallet_pos_m = np.asarray(
-            [observation[7] * half_length_m, observation[6] * half_width_m],
-            dtype=np.float64,
-        )
+        physical_state = self.sim_bridge.get_opponent_physical_state()
+        if physical_state is None:
+            return 0.0, 0.0
+        puck_pos_m, puck_vel_mps, mallet_pos_m = physical_state
+        field_length_mm = SimBridge.PHYSICAL_TABLE_LENGTH_MM
+        field_width_mm = SimBridge.PHYSICAL_TABLE_WIDTH_MM
 
         desired_velocity_mps = np.asarray(
             self.opponent.get_action(
@@ -134,7 +111,7 @@ class ScriptedOpponentWorker(QThread):
         if desired_velocity_mps.shape != (2,) or not np.isfinite(desired_velocity_mps).all():
             raise ValueError("Opponent must return a finite 2D velocity in m/s")
 
-        # Policies return (depth, width); PLC axes are (width, depth).
+        # Policies return (depth, width); PLC Y decreases as depth x advances.
         vx_mm_s = float(desired_velocity_mps[1] * 1000.0)
-        vy_mm_s = float(-desired_velocity_mps[0] * 1000.0)
+        vy_mm_s = float(desired_velocity_mps[0] * 1000.0)
         return limit_velocity(vx_mm_s, vy_mm_s)

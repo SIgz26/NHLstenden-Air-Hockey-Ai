@@ -35,6 +35,8 @@ class SimBridge:
 
     PLC_X_BOUNDS_MM = (-463.2, 370.5)
     PLC_Y_BOUNDS_MM = (53.7, 789.5)
+    PHYSICAL_TABLE_LENGTH_MM = 1940.0
+    PHYSICAL_TABLE_WIDTH_MM = 1020.0
 
     def __init__(
         self,
@@ -160,6 +162,73 @@ class SimBridge:
         if self._raw_puck is not None:
             self._observation = self._calculate_observation()
             self._publish_latest(self._observation)
+
+    def get_opponent_physical_state(
+        self,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+        """Return full-table puck state and PLC robot position in opponent axes.
+
+        The opponent frame uses positive depth toward our goal and negative
+        depth toward the opponent goal. Returns ``None`` until the table,
+        puck sample, and PLC robot pose are all available. This helper does
+        not modify the normalized observation pipeline.
+        """
+        if (
+            not self._physical_table_calibrated
+            or self._raw_puck is None
+            or self._plc_robot_pose_mm is None
+        ):
+            return None
+
+        puck_x, puck_y, puck_vx, puck_vy, frame_rate = self._raw_puck
+        puck_point = self._transform_point(puck_x, puck_y)
+        velocity_endpoint = self._transform_point(
+            puck_x + puck_vx, puck_y + puck_vy
+        )
+        rectified_vx = velocity_endpoint[0] - puck_point[0]
+        rectified_vy = velocity_endpoint[1] - puck_point[1]
+
+        puck_x_norm = self._normalize(puck_point[0], self.x_bounds)
+        puck_y_norm = self._normalize(puck_point[1], self.y_bounds)
+        if self.invert_y:
+            puck_y_norm = -puck_y_norm
+
+        field_length_m = self.PHYSICAL_TABLE_LENGTH_MM / 1000.0
+        field_width_m = self.PHYSICAL_TABLE_WIDTH_MM / 1000.0
+        puck_pos_m = np.asarray(
+            [-puck_y_norm * field_length_m / 2.0, puck_x_norm * field_width_m / 2.0],
+            dtype=np.float64,
+        )
+        puck_vel_mps = np.asarray(
+            [
+                rectified_vy
+                * frame_rate
+                * field_length_m
+                / (self.y_bounds[1] - self.y_bounds[0]),
+                rectified_vx
+                * frame_rate
+                * field_width_m
+                / (self.x_bounds[1] - self.x_bounds[0]),
+            ],
+            dtype=np.float64,
+        )
+
+        plc_x_min, plc_x_max = self.PLC_X_BOUNDS_MM
+        plc_y_min, plc_y_max = self.PLC_Y_BOUNDS_MM
+        robot_x_mm, robot_y_mm = self._plc_robot_pose_mm
+        robot_x_mm = float(np.clip(robot_x_mm, plc_x_min, plc_x_max))
+        robot_y_mm = float(np.clip(robot_y_mm, plc_y_min, plc_y_max))
+        robot_pos_m = np.asarray(
+            [
+                (robot_y_mm - plc_y_min)
+                / (plc_y_max - plc_y_min)
+                * field_length_m
+                / 2.0,
+                robot_x_mm / 1000.0,
+            ],
+            dtype=np.float64,
+        )
+        return puck_pos_m, puck_vel_mps, robot_pos_m
 
     def _rebuild_perspective_matrix(self) -> None:
         if self._table_corners is None:

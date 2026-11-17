@@ -659,7 +659,7 @@ class OrionLiveDashboard(QWidget):
         self._latest_action_mm_s = (vx_mm_s, vy_mm_s)
         if self.digital_twin_window is not None:
             self.digital_twin_window.update_sac_action(
-                -vy_mm_s / 1000.0, vx_mm_s / 1000.0
+                vx_mm_s / 1000.0, -vy_mm_s / 1000.0
             )
 
     def _on_scripted_finished(self) -> None:

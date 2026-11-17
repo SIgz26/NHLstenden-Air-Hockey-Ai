@@ -19,6 +19,36 @@ from core.sim_bridge import SimBridge
 from ui.widgets.digital_twin_widget import DigitalTwinWidget, DigitalTwinWindow
 
 
+def test_scripted_plc_velocity_signs_align_with_twin_action_axes():
+    app = QApplication.instance() or QApplication([])
+    widget = DigitalTwinWidget()
+    field = widget._field_rect()
+    observation = np.zeros(8, dtype=np.float32)
+    observation[7] = 0.0
+    widget.update_observation_vector(observation)
+
+    plc_vx_mm_s = 120.0
+    plc_vy_mm_s = -160.0
+    widget.update_sac_action(
+        plc_vx_mm_s / 1000.0,
+        -plc_vy_mm_s / 1000.0,
+    )
+
+    robot = widget._robot_point(field)
+    endpoints = widget.get_action_vector_endpoints(field)
+    assert endpoints is not None
+    vx_endpoint, vy_endpoint, result_endpoint = endpoints
+    assert vx_endpoint.x() == robot.x()
+    assert vx_endpoint.y() < robot.y()
+    assert vy_endpoint.x() > robot.x()
+    assert vy_endpoint.y() == robot.y()
+    assert result_endpoint.x() > robot.x()
+    assert result_endpoint.y() < robot.y()
+
+    widget.close()
+    app.processEvents()
+
+
 def _make_dummy_bridge() -> SimBridge:
     bridge = SimBridge(
         x_bounds=(0.0, 1000.0),

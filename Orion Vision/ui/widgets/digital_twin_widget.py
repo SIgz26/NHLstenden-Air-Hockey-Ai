@@ -112,7 +112,7 @@ class DigitalTwinWidget(QWidget):
         )
 
         result_direction_x = vy / result_speed if result_speed > 0.0 else 0.0
-        result_direction_y = -vx / result_speed if result_speed > 0.0 else 0.0
+        result_direction_y = vx / result_speed if result_speed > 0.0 else 0.0
         resultant_endpoint = self._clip_to_field(
             field,
             QPointF(
@@ -143,9 +143,11 @@ class DigitalTwinWidget(QWidget):
         return max(9.0, min(field.width(), field.height()) * 0.075)
 
     def _robot_point(self, field: QRectF) -> QPointF:
-        """Map PLC-Y across the field and PLC-X from side to side."""
+        """Map PLC-Y from the robot goal to the center line."""
         return self._field_point(
-            field, float(self._observation[7]), float(self._observation[6])
+            field,
+            (float(self._observation[7]) - 1.0) / 2.0,
+            float(self._observation[6]),
         )
 
     def get_action_endpoint_clearances(

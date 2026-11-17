@@ -57,6 +57,7 @@ def _calibrated_bridge(*, detected: bool = True) -> SimBridge:
         frame_rate=20.0,
     )
     bridge.update_telemetry(robot_position=(500.0, 400.0))
+    bridge.set_robot_position_mm(-46.35, 421.6)
     return bridge
 
 
@@ -70,16 +71,124 @@ def test_scripted_worker_converts_physical_axes_and_limits_speed(monkeypatch) ->
 
     velocity = worker._calculate_action()
 
-    assert velocity == (300.0, -200.0)
+    assert velocity == (300.0, 200.0)
     received = _RecordingOpponent.received
     assert received is not None
     puck_pos, puck_vel, mallet_pos, field_length, field_width, mallet_radius = received
     np.testing.assert_allclose(puck_pos, [0.0, 0.0], atol=1e-6)
     np.testing.assert_allclose(puck_vel, [0.0, 0.0], atol=1e-6)
-    np.testing.assert_allclose(mallet_pos, [0.0, 0.0], atol=1e-6)
-    assert field_length == 0.7358
-    assert field_width == 0.8337
+    np.testing.assert_allclose(mallet_pos, [0.485, -0.04635], atol=1e-6)
+    assert field_length == 1.94
+    assert field_width == 1.02
     assert mallet_radius == 0.048
+
+
+def test_scripted_worker_maps_our_goal_to_positive_half_length(monkeypatch) -> None:
+    monkeypatch.setitem(OPPONENTS, "Recording", _RecordingOpponent)
+    _RecordingOpponent.received = None
+    bridge = _calibrated_bridge()
+    bridge.set_robot_position_mm(0.0, 789.5)
+    worker = ScriptedOpponentWorker(bridge, "Recording")
+
+    worker._calculate_action()
+
+    received = _RecordingOpponent.received
+    assert received is not None
+    np.testing.assert_allclose(received[2], [0.97, 0.0], atol=1e-6)
+
+
+def test_scripted_worker_maps_forward_velocity_to_negative_plc_y(monkeypatch) -> None:
+    class ForwardOpponent(_RecordingOpponent):
+        def get_action(self, **kwargs) -> np.ndarray:
+            return np.asarray([-0.2, 0.3], dtype=np.float64)
+
+    monkeypatch.setitem(OPPONENTS, "Forward", ForwardOpponent)
+    worker = ScriptedOpponentWorker(_calibrated_bridge(), "Forward")
+
+    assert worker._calculate_action() == (300.0, -200.0)
+
+
+def test_scripted_worker_clamps_converted_velocity_vector_to_500_mm_s(monkeypatch) -> None:
+    class FastOpponent(_RecordingOpponent):
+        def get_action(self, **kwargs) -> np.ndarray:
+            return np.asarray([-3.5, 2.5], dtype=np.float64)
+
+    monkeypatch.setitem(OPPONENTS, "Fast", FastOpponent)
+    worker = ScriptedOpponentWorker(_calibrated_bridge(), "Fast")
+
+    vx_mm_s, vy_mm_s = worker._calculate_action()
+
+    assert vx_mm_s > 0.0
+    assert vy_mm_s < 0.0
+    assert np.isclose(np.hypot(vx_mm_s, vy_mm_s), 500.0)
+
+
+def test_opponent_physical_state_uses_full_table_and_plc_robot_coordinates() -> None:
+    bridge = _calibrated_bridge()
+    observation_before = bridge.get_observation_vector()
+
+    physical_state = bridge.get_opponent_physical_state()
+
+    assert physical_state is not None
+    puck_pos, puck_vel, robot_pos = physical_state
+    np.testing.assert_array_equal(bridge.get_observation_vector(), observation_before)
+    np.testing.assert_allclose(puck_pos, [0.0, 0.0], atol=1e-6)
+    np.testing.assert_allclose(puck_vel, [0.0, 0.0], atol=1e-6)
+    np.testing.assert_allclose(robot_pos, [0.485, -0.04635], atol=1e-6)
+
+
+def test_opponent_physical_state_maps_full_table_and_forward_velocity() -> None:
+    bridge = _calibrated_bridge()
+    bridge.update_from_engine(
+        {
+            "x": 500.0,
+            "y": 400.0,
+            "vx": 0.0,
+            "vy": -1.0,
+            "metadata": {"in_range": True},
+        },
+        frame_width=1000,
+        frame_height=800,
+        frame_rate=20.0,
+    )
+
+    physical_state = bridge.get_opponent_physical_state()
+
+    assert physical_state is not None
+    puck_pos, puck_vel, _ = physical_state
+    assert puck_vel[0] < 0.0
+    top_left = bridge.update_from_engine(
+        {
+            "x": 0.0,
+            "y": 0.0,
+            "vx": 0.0,
+            "vy": 0.0,
+            "metadata": {"in_range": True},
+        },
+        frame_width=1000,
+        frame_height=800,
+        frame_rate=20.0,
+    )
+    assert top_left is not None
+    top_left_state = bridge.get_opponent_physical_state()
+    assert top_left_state is not None
+    np.testing.assert_allclose(top_left_state[0], [-0.97, -0.51], atol=1e-5)
+    bottom_right = bridge.update_from_engine(
+        {
+            "x": 1000.0,
+            "y": 800.0,
+            "vx": 0.0,
+            "vy": 0.0,
+            "metadata": {"in_range": True},
+        },
+        frame_width=1000,
+        frame_height=800,
+        frame_rate=20.0,
+    )
+    assert bottom_right is not None
+    bottom_right_state = bridge.get_opponent_physical_state()
+    assert bottom_right_state is not None
+    np.testing.assert_allclose(bottom_right_state[0], [0.97, 0.51], atol=1e-5)
 
 
 def test_scripted_worker_outputs_zero_when_puck_is_not_detected() -> None:
