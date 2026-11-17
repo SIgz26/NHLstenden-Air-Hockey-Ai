@@ -53,7 +53,16 @@ def test_digital_twin_renders_dummy_observation():
     assert widget._observation.shape == (8,)
     assert np.isfinite(widget._observation).all()
     field = widget._field_rect()
-    assert abs(field.width() / field.height() - 1.8) < 1e-6
+    assert abs(
+        field.width() / field.height()
+        - DigitalTwinWidget.FIELD_WIDTH_MM / DigitalTwinWidget.FIELD_DEPTH_MM
+    ) < 1e-6
+    assert DigitalTwinWidget.FIELD_WIDTH_MM == 1940.0
+    assert DigitalTwinWidget.FIELD_DEPTH_MM == 1020.0
+    assert DigitalTwinWidget._twin_point(field, -1.0, -1.0).x() == field.left()
+    assert DigitalTwinWidget._twin_point(field, -1.0, -1.0).y() == field.top()
+    assert DigitalTwinWidget._twin_point(field, 1.0, 1.0).x() == field.right()
+    assert DigitalTwinWidget._twin_point(field, 1.0, 1.0).y() == field.bottom()
     assert image.pixelColor(20, 20) != QColor("#000000")
 
     widget.close()
@@ -83,12 +92,12 @@ def test_sac_action_target_vector_scales_from_robot_and_renders_at_sizes():
     widget.update_sac_action(0.8, -0.4)
 
     field = widget._field_rect()
-    robot = widget._field_point(field, *_make_dummy_bridge().get_observation_vector()[6:8])
+    robot = widget._twin_point(field, *_make_dummy_bridge().get_observation_vector()[6:8])
     endpoints = widget.get_action_vector_endpoints(field)
     assert endpoints is not None
     vx_endpoint, vy_endpoint, target_endpoint = endpoints
-    assert vx_endpoint.x() > robot.x()
-    assert vy_endpoint.y() > robot.y()
+    assert vx_endpoint.y() > robot.y()
+    assert vy_endpoint.x() > robot.x()
     assert target_endpoint.x() > robot.x()
     assert target_endpoint.y() > robot.y()
     assert widget.get_robot_action_target() is not None
@@ -120,11 +129,13 @@ def test_small_sac_actions_get_visible_component_and_resultant_vectors():
     bridge = _make_dummy_bridge()
     widget = DigitalTwinWidget(bridge)
     widget.resize(480, 280)
+    observation = bridge.get_observation_vector()
+    observation[6:8] = 0.0
+    widget.update_observation_vector(observation)
     widget.update_sac_action(0.05, -0.01)
 
     field = widget._field_rect()
-    observation = bridge.get_observation_vector()
-    robot = widget._field_point(field, float(observation[6]), float(observation[7]))
+    robot = widget._twin_point(field, float(observation[6]), float(observation[7]))
     endpoints = widget.get_action_vector_endpoints(field)
     assert endpoints is not None
     vx_endpoint, vy_endpoint, resultant_endpoint = endpoints
@@ -133,11 +144,11 @@ def test_small_sac_actions_get_visible_component_and_resultant_vectors():
     assert clearances is not None
     assert all(distance >= robot_radius + 10.0 for distance in clearances)
 
-    assert abs(vx_endpoint.x() - robot.x()) >= widget.MIN_ACTION_VECTOR_PIXELS - 0.01
-    assert abs(vx_endpoint.y() - robot.y()) < 0.01
-    assert abs(vy_endpoint.y() - robot.y()) >= widget.MIN_ACTION_VECTOR_PIXELS - 0.01
-    assert abs(vy_endpoint.x() - robot.x()) < 0.01
-    assert vy_endpoint.y() > robot.y()
+    assert abs(vx_endpoint.y() - robot.y()) >= widget.MIN_ACTION_VECTOR_PIXELS - 0.01
+    assert abs(vx_endpoint.x() - robot.x()) < 0.01
+    assert abs(vy_endpoint.x() - robot.x()) >= widget.MIN_ACTION_VECTOR_PIXELS - 0.01
+    assert abs(vy_endpoint.y() - robot.y()) < 0.01
+    assert vy_endpoint.x() > robot.x()
     assert np.hypot(
         resultant_endpoint.x() - robot.x(),
         resultant_endpoint.y() - robot.y(),
@@ -167,8 +178,8 @@ def test_predicted_puck_path_and_robot_goal_intercept_render():
     bridge.update(
         puck_x=0.5,
         puck_y=1.0,
-        puck_vx=-0.5,
-        puck_vy=0.0,
+        puck_vx=0.0,
+        puck_vy=-0.5,
         frame_rate=1.0,
         robot_x=0.1,
         robot_y=1.0,
@@ -180,8 +191,8 @@ def test_predicted_puck_path_and_robot_goal_intercept_render():
     widget.update_sac_action(0.2, 0.1)
 
     trajectory = bridge.predict_puck_trajectory()
-    assert trajectory[-1][0] == -1.0
-    assert abs(trajectory[-1][1]) < 1e-6
+    assert trajectory[-1][1] == -1.0
+    assert trajectory[-1][0] == -0.5
 
     image = QImage(widget.size(), QImage.Format_ARGB32)
     image.fill(QColor("#000000"))

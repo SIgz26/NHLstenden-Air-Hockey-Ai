@@ -39,8 +39,26 @@ def test_controller_reads_live_vector_and_returns_two_actions():
 
 def test_worker_runs_approximately_at_100_hz_and_calls_action_sink():
     bridge = SimBridge()
-    bridge.update(0.5, 0.5, 0.0, 0.0, frame_rate=60.0)
-    controller = LiveSACController(bridge, model=DummySACModel((0.1, 0.2)))
+    bridge.set_table_corners(
+        top_left=(0.0, 0.0),
+        top_right=(1000.0, 0.0),
+        bottom_right=(1000.0, 800.0),
+        bottom_left=(0.0, 800.0),
+    )
+    bridge.configure_physical_table_bounds()
+    bridge.update_from_engine(
+        {
+            "x": 500.0,
+            "y": 400.0,
+            "vx": 0.0,
+            "vy": 0.0,
+            "metadata": {"in_range": True},
+        },
+        frame_width=1000,
+        frame_height=800,
+        frame_rate=60.0,
+    )
+    controller = LiveSACController(bridge, model=DummySACModel((0.1, 0.1)))
     sent_actions = []
     worker = SACAgentWorker(
         controller,
@@ -56,7 +74,43 @@ def test_worker_runs_approximately_at_100_hz_and_calls_action_sink():
     assert 8 <= worker.completed_steps <= 25
     assert len(sent_actions) == worker.completed_steps
     assert sent_actions
-    np.testing.assert_allclose(sent_actions[-1], (0.1, 0.2), atol=1e-7)
+    np.testing.assert_allclose(sent_actions[-1], (250.0, -250.0), atol=1e-7)
+
+
+def test_controller_reorders_calibrated_live_axes_for_training_policy():
+    bridge = SimBridge()
+    bridge.set_table_corners(
+        top_left=(0.0, 0.0),
+        top_right=(1000.0, 0.0),
+        bottom_right=(1000.0, 800.0),
+        bottom_left=(0.0, 800.0),
+    )
+    bridge.configure_physical_table_bounds()
+    bridge.update_from_engine(
+        {
+            "x": 250.0,
+            "y": 200.0,
+            "vx": 0.0,
+            "vy": 0.0,
+            "metadata": {"in_range": True},
+        },
+        frame_width=1000,
+        frame_height=800,
+        frame_rate=60.0,
+    )
+    bridge.update_telemetry(
+        robot_position=(750.0, 600.0),
+        opponent_position=(100.0, 100.0),
+    )
+    model = DummySACModel()
+
+    LiveSACController(bridge, model=model).predict_action()
+
+    np.testing.assert_allclose(
+        model.last_observation[[0, 1, 4, 5, 6, 7]],
+        [0.5, -0.5, 0.75, -0.8, -0.5, 0.5],
+        atol=1e-6,
+    )
 
 
 def test_controller_rejects_wrong_action_dimension():

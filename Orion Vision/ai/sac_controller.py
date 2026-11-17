@@ -132,6 +132,8 @@ class LiveSACController:
         ).reshape(-1)
         if observation.shape != (8,) or not np.isfinite(observation).all():
             raise ValueError("SimBridge must provide a finite 8D observation vector")
+        if getattr(self.sim_bridge, "physical_table_calibrated", False):
+            observation = observation[[1, 0, 3, 2, 5, 4, 7, 6]]
 
         prediction = self.model.predict(observation, deterministic=True)
         action = prediction[0] if isinstance(prediction, tuple) else prediction

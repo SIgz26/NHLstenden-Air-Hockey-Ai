@@ -33,6 +33,9 @@ class SimBridge:
             simulation consumer.
     """
 
+    PLC_X_BOUNDS_MM = (-463.2, 370.5)
+    PLC_Y_BOUNDS_MM = (53.7, 789.5)
+
     def __init__(
         self,
         x_bounds: tuple[float, float] = (0.0, 1.0),
@@ -68,6 +71,10 @@ class SimBridge:
         self._robot_xy: tuple[float, float] | None = None
         self._opponent_velocity: tuple[float, float] = (0.0, 0.0)
         self._opponent_sample: tuple[tuple[float, float], float] | None = None
+        self._physical_table_calibrated = False
+        self._puck_detected = False
+        self._last_puck_update: float | None = None
+        self._plc_robot_pose_mm: tuple[float, float] | None = None
 
     @staticmethod
     def _validate_bounds(name: str, bounds: tuple[float, float]) -> None:
@@ -101,9 +108,73 @@ class SimBridge:
         self.x_bounds = (self.table_x_min, self.table_x_max)
         self.y_bounds = (self.table_y_min, self.table_y_max)
         self._table_bounds_explicit = True
+        self._rebuild_perspective_matrix()
         if self._raw_puck is not None:
             self._observation = self._calculate_observation()
             self._publish_latest(self._observation)
+
+    def configure_physical_table_bounds(self) -> None:
+        """Map calibrated camera corners to the PLC's physical millimeter axes.
+
+        Image left/right maps to PLC X (table width). Image top/bottom maps to
+        PLC Y (table depth); with ``invert_y=True``, the image top is the
+        minimum PLC Y edge.
+        """
+        if self._table_corners is None:
+            raise RuntimeError("Calibrate the four table corners before physical control")
+        x_min, x_max = self.PLC_X_BOUNDS_MM
+        y_min, y_max = self.PLC_Y_BOUNDS_MM
+        self.set_table_bounds(x_min, y_min, x_max, y_max)
+        self._physical_table_calibrated = True
+        if self._raw_puck is not None:
+            self._observation = self._calculate_observation()
+            self._publish_latest(self._observation)
+
+    @property
+    def physical_table_calibrated(self) -> bool:
+        return self._physical_table_calibrated
+
+    def has_fresh_puck_detection(self, max_age_s: float = 0.25) -> bool:
+        """Whether the latest engine sample detected the puck recently."""
+        if max_age_s <= 0.0:
+            raise ValueError("max_age_s must be greater than zero")
+        return (
+            self._puck_detected
+            and self._last_puck_update is not None
+            and time.monotonic() - self._last_puck_update <= max_age_s
+        )
+
+    def set_robot_position_mm(self, x_mm: float, y_mm: float) -> None:
+        """Override the camera mallet position with the latest PLC pose."""
+        pose = float(x_mm), float(y_mm)
+        if not np.isfinite(pose).all():
+            raise ValueError("PLC robot pose must contain finite coordinates")
+        self._plc_robot_pose_mm = pose
+        if self._raw_puck is not None:
+            self._observation = self._calculate_observation()
+            self._publish_latest(self._observation)
+
+    def clear_robot_position_mm(self) -> None:
+        """Stop using a PLC pose after the PLC marks it invalid."""
+        self._plc_robot_pose_mm = None
+        if self._raw_puck is not None:
+            self._observation = self._calculate_observation()
+            self._publish_latest(self._observation)
+
+    def _rebuild_perspective_matrix(self) -> None:
+        if self._table_corners is None:
+            return
+        source = np.asarray(self._table_corners, dtype=np.float32)
+        destination = np.asarray(
+            [
+                [self.table_x_min, self.table_y_min],
+                [self.table_x_max, self.table_y_min],
+                [self.table_x_max, self.table_y_max],
+                [self.table_x_min, self.table_y_max],
+            ],
+            dtype=np.float32,
+        )
+        self._perspective_matrix = cv2.getPerspectiveTransform(source, destination)
 
     def set_table_corners(
         self,
@@ -150,19 +221,10 @@ class SimBridge:
             self.y_bounds = (self.table_y_min, self.table_y_max)
             self._table_bounds_explicit = True
 
-        destination = np.asarray(
-            [
-                [self.table_x_min, self.table_y_min],
-                [self.table_x_max, self.table_y_min],
-                [self.table_x_max, self.table_y_max],
-                [self.table_x_min, self.table_y_max],
-            ],
-            dtype=np.float32,
-        )
-        self._perspective_matrix = cv2.getPerspectiveTransform(source, destination)
         self._table_corners = tuple(
             (float(point[0]), float(point[1])) for point in source
         )
+        self._rebuild_perspective_matrix()
         if self._raw_puck is not None:
             self._observation = self._calculate_observation()
             self._publish_latest(self._observation)
@@ -185,6 +247,8 @@ class SimBridge:
         self._perspective_matrix = None
         self._table_corners = None
         self._table_bounds_explicit = False
+        self._physical_table_calibrated = False
+        self._plc_robot_pose_mm = None
         if frame_width is not None and frame_height is not None:
             if frame_width <= 1 or frame_height <= 1:
                 raise ValueError("frame dimensions must both be greater than one pixel")
@@ -312,7 +376,14 @@ class SimBridge:
         if self.invert_y:
             puck_y_norm = -puck_y_norm
         opp_x_norm, opp_y_norm = self._normalize_optional(self._opponent_xy)
-        robot_x_norm, robot_y_norm = self._normalize_optional(self._robot_xy)
+        if self._plc_robot_pose_mm is not None and self._physical_table_calibrated:
+            robot_x_mm, robot_y_mm = self._plc_robot_pose_mm
+            robot_x_norm = self._normalize(robot_x_mm, self.x_bounds)
+            robot_y_norm = self._normalize(robot_y_mm, self.y_bounds)
+            if self.invert_y:
+                robot_y_norm = -robot_y_norm
+        else:
+            robot_x_norm, robot_y_norm = self._normalize_optional(self._robot_xy)
 
         y_sign = -1.0 if self.invert_y else 1.0
         x_half_range = (self.x_bounds[1] - self.x_bounds[0]) / 2.0
@@ -358,6 +429,13 @@ class SimBridge:
                 self.x_bounds = (self.table_x_min, self.table_x_max)
                 self.y_bounds = (self.table_y_min, self.table_y_max)
                 self._frame_size = current_size
+        metadata = result.get("metadata")
+        self._puck_detected = (
+            bool(metadata.get("in_range", True))
+            if isinstance(metadata, Mapping)
+            else True
+        )
+        self._last_puck_update = time.monotonic()
         return self.update(
             puck_x=float(result.get("x", 0.0)),
             puck_y=float(result.get("y", 0.0)),
@@ -414,7 +492,7 @@ class SimBridge:
 
         The observation stores puck velocity as normalized displacement per
         simulation step. It is converted back to normalized units per second
-        with ``sim_dt``. The puck reflects from the top/bottom rails and stops
+        with ``sim_dt``. The puck reflects from the left/right rails and stops
         when it reaches either goal line, exhausts ``time_horizon``, or reaches
         ``max_bounces``.
 
@@ -442,19 +520,19 @@ class SimBridge:
                 break
 
             time_to_goal = float("inf")
-            if vx > epsilon:
-                time_to_goal = (1.0 - x) / vx
-            elif vx < -epsilon:
-                time_to_goal = (-1.0 - x) / vx
+            if vy > epsilon:
+                time_to_goal = (1.0 - y) / vy
+            elif vy < -epsilon:
+                time_to_goal = (-1.0 - y) / vy
 
             time_to_wall = float("inf")
-            wall_y = y
-            if vy > epsilon:
-                time_to_wall = (1.0 - y) / vy
-                wall_y = 1.0
-            elif vy < -epsilon:
-                time_to_wall = (-1.0 - y) / vy
-                wall_y = -1.0
+            wall_x = x
+            if vx > epsilon:
+                time_to_wall = (1.0 - x) / vx
+                wall_x = 1.0
+            elif vx < -epsilon:
+                time_to_wall = (-1.0 - x) / vx
+                wall_x = -1.0
 
             event_time = min(time_to_goal, time_to_wall)
             if event_time < 0.0:
@@ -471,14 +549,14 @@ class SimBridge:
             remaining -= event_time
 
             if time_to_goal <= time_to_wall:
-                x = -1.0 if vx < 0.0 else 1.0
-                points.append((x, float(np.clip(y, -1.0, 1.0))))
+                y = -1.0 if vy < 0.0 else 1.0
+                points.append((float(np.clip(x, -1.0, 1.0)), y))
                 break
 
-            y = wall_y
-            points.append((float(np.clip(x, -1.0, 1.0)), y))
+            x = wall_x
+            points.append((x, float(np.clip(y, -1.0, 1.0))))
             bounce_count += 1
-            vy = -vy
+            vx = -vx
             if bounce_count >= max_bounces:
                 break
 

@@ -1,6 +1,7 @@
 import cv2
 import json
 import numpy as np
+import threading
 from pathlib import Path
 
 from PyQt5.QtCore import Qt, pyqtSignal, QSettings
@@ -15,7 +16,9 @@ from core.gige_worker import GigECameraWorker, VMBPY_AVAILABLE
 from core.auto_calibration import ManualTableCalibrator
 from core.sim_bridge import SimBridge
 from ai.agent_worker import SACAgentWorker
+from ai.scripted_worker import ScriptedOpponentWorker
 from ai.sac_controller import LiveSACController
+from core.opcua_worker import OpcUaWorker, limit_velocity
 from ui.debug_window import CameraDebugDialog
 from ui.widgets.digital_twin_widget import DigitalTwinWindow
 
@@ -99,6 +102,15 @@ class OrionLiveDashboard(QWidget):
         self.sac_model_path: str | None = None
         self.sac_action_sink = None
         self._latest_sac_action: tuple[float, float] | None = None
+        self.scripted_worker: ScriptedOpponentWorker | None = None
+        self.opcua_worker: OpcUaWorker | None = None
+        self._controller_generation = 0
+        self._action_lock = threading.Lock()
+        self._latest_action_mm_s = (0.0, 0.0)
+        self._restart_controller_after_stop = False
+        self._stream_stopping = False
+        self._opcua_connected = False
+        self._pending_zero_revision: int | None = None
         self.on_back = on_back_callback
         self._init_ui()
 
@@ -281,6 +293,21 @@ class OrionLiveDashboard(QWidget):
         agent_layout.setSpacing(6)
         agent_layout.addWidget(self._section_label("AI AGENT CONTROL"))
 
+        self.combo_controller = QComboBox()
+        self.combo_controller.addItems(
+            [
+                "None (Idle)",
+                "SAC Agent",
+                "Complex Opponent",
+                "Attacker",
+                "Defender",
+            ]
+        )
+        self.combo_controller.currentTextChanged.connect(
+            self._on_controller_selected
+        )
+        agent_layout.addWidget(self.combo_controller)
+
         agent_buttons = QHBoxLayout()
         self.btn_load_sac_model = QPushButton("LOAD MODEL")
         self.btn_load_sac_model.clicked.connect(self._load_sac_model)
@@ -297,6 +324,22 @@ class OrionLiveDashboard(QWidget):
         agent_layout.addWidget(self.lbl_sac_model)
         agent_layout.addWidget(self.lbl_sac_action)
         agent_layout.addWidget(self.lbl_sac_status)
+
+        opcua_row = QHBoxLayout()
+        self.btn_toggle_opcua = QPushButton("CONNECT OPC UA")
+        self.btn_toggle_opcua.setCheckable(True)
+        self.btn_toggle_opcua.toggled.connect(self._toggle_opcua_connection)
+        opcua_row.addWidget(self.btn_toggle_opcua)
+        self.lbl_opcua_status = QLabel("OPC UA: Disconnected")
+        self.lbl_opcua_status.setWordWrap(True)
+        opcua_row.addWidget(self.lbl_opcua_status, stretch=1)
+        agent_layout.addLayout(opcua_row)
+        self.lbl_plc_machine_status = QLabel(
+            "PLC: Homed -- | Tracking -- | Error -- | State --"
+        )
+        self.lbl_plc_machine_status.setWordWrap(True)
+        agent_layout.addWidget(self.lbl_plc_machine_status)
+
         layout.addWidget(agent_panel)
 
         self.feed_primary = ClickableVideoLabel("Live Camera Feed (Offline)")
@@ -405,12 +448,14 @@ class OrionLiveDashboard(QWidget):
         self.btn_refresh_cams.setEnabled(False)
         self.combo_camera.setEnabled(False)
         self.btn_pause.setEnabled(True)
+        self._start_selected_controller()
 
     def _stop_stream(self) -> None:
         if self.live_worker is None:
             return
 
-        self._stop_sac_agent()
+        self._stream_stopping = True
+        self._stop_active_controller()
 
         self.live_worker.stop()
 
@@ -419,6 +464,7 @@ class OrionLiveDashboard(QWidget):
             self.live_worker.terminate()
 
         self.live_worker = None
+        self._stream_stopping = False
         self.feed_primary.set_table_calibration_mode(False)
         self._manual_table_calibrator.reset()
         self._calibration_frame_size = None
@@ -451,6 +497,8 @@ class OrionLiveDashboard(QWidget):
             self.lbl_sac_model.setText(f"Model: {model_path}")
             self.lbl_sac_status.setText("Model loaded; start live camera to run agent")
             self.btn_toggle_sac_agent.setEnabled(True)
+            if self.combo_controller.currentText() == "SAC Agent":
+                self._start_sac_agent()
         except Exception as exc:
             self.sac_controller = None
             self.sac_model_path = None
@@ -459,12 +507,26 @@ class OrionLiveDashboard(QWidget):
             self.lbl_sac_status.setText(f"Model load failed: {exc}")
 
     def _toggle_sac_agent(self) -> None:
-        """Start or stop the 100 Hz policy worker."""
+        """Select SAC, or toggle it when it is already the active controller."""
+        if self.combo_controller.currentText() != "SAC Agent":
+            self.combo_controller.setCurrentText("SAC Agent")
+            return
         if self.sac_worker is not None and self.sac_worker.isRunning():
-            self._stop_sac_agent()
+            self.combo_controller.setCurrentText("None (Idle)")
+            return
+        self._start_sac_agent()
+
+    def _start_sac_agent(self) -> None:
+        """Start the SAC inference worker with the common mm/s action sink."""
+        if self._pending_zero_revision is not None:
             return
         if self.live_worker is None or not self.live_worker.isRunning():
             self.lbl_sac_status.setText("Start the live camera before the agent.")
+            return
+        if not self.live_worker.sim_bridge.physical_table_calibrated:
+            self.lbl_sac_status.setText(
+                "Calibrate all four table corners before enabling physical control."
+            )
             return
         if self.sac_controller is None or self.sac_controller.model is None:
             if not self._offer_dummy_sac_model():
@@ -472,9 +534,10 @@ class OrionLiveDashboard(QWidget):
                 return
 
         self.sac_controller.sim_bridge = self.live_worker.sim_bridge
+        generation = self._controller_generation
         self.sac_worker = SACAgentWorker(
             self.sac_controller,
-            action_sink=self.sac_action_sink,
+            action_sink=self._make_action_sink(generation),
             frequency_hz=100.0,
             parent=self,
         )
@@ -484,6 +547,212 @@ class OrionLiveDashboard(QWidget):
         self.sac_worker.start()
         self.btn_toggle_sac_agent.setText("STOP SAC AGENT")
         self.lbl_sac_status.setText("SAC agent running at 100 Hz")
+
+    def _on_controller_selected(self, controller_name: str) -> None:
+        self._stop_active_controller()
+        if controller_name != "None (Idle)":
+            self._start_selected_controller()
+
+    def _start_selected_controller(self) -> None:
+        if (
+            self._stream_stopping
+            or self._pending_zero_revision is not None
+            or self.live_worker is None
+            or not self.live_worker.isRunning()
+            or self.sac_worker is not None
+            or self.scripted_worker is not None
+        ):
+            return
+
+        controller_name = self.combo_controller.currentText()
+        if controller_name == "None (Idle)":
+            self.lbl_sac_status.setText("Controller idle")
+            return
+        if not self.live_worker.sim_bridge.physical_table_calibrated:
+            self.lbl_sac_status.setText(
+                "Calibrate all four table corners before enabling physical control."
+            )
+            return
+
+        generation = self._controller_generation
+        action_sink = self._make_action_sink(generation)
+        if controller_name == "SAC Agent":
+            if self.sac_controller is None or self.sac_controller.model is None:
+                self.lbl_sac_status.setText(
+                    "Load a SAC model before selecting the SAC Agent."
+                )
+                return
+            self._start_sac_agent()
+            return
+        try:
+            worker = ScriptedOpponentWorker(
+                self.live_worker.sim_bridge,
+                controller_name,
+                action_sink=action_sink,
+                frequency_hz=50.0,
+                parent=self,
+            )
+        except ValueError as exc:
+            self.lbl_sac_status.setText(str(exc))
+            return
+        self.scripted_worker = worker
+        worker.action_updated.connect(self._on_scripted_action)
+        worker.error_occurred.connect(self._on_sac_error)
+        worker.finished.connect(self._on_scripted_finished)
+        worker.start()
+        self.lbl_sac_status.setText(f"{controller_name} running at 50 Hz")
+        self.btn_toggle_sac_agent.setText("START SAC AGENT")
+
+    def _make_action_sink(self, generation: int):
+        def enqueue(vx_mm_s: float, vy_mm_s: float) -> None:
+            with self._action_lock:
+                if generation != self._controller_generation:
+                    return
+                self._latest_action_mm_s = limit_velocity(vx_mm_s, vy_mm_s)
+                worker = self.opcua_worker
+                if worker is not None and worker.accepting_commands:
+                    worker.set_target_velocity(*self._latest_action_mm_s)
+
+        return enqueue
+
+    def _stop_active_controller(self) -> None:
+        with self._action_lock:
+            self._controller_generation += 1
+            worker = self.opcua_worker
+            if worker is not None and worker.accepting_commands:
+                revision = worker.set_target_velocity(0.0, 0.0)
+                self._pending_zero_revision = (
+                    revision if self._opcua_connected else None
+                )
+            self._latest_action_mm_s = (0.0, 0.0)
+        if self.digital_twin_window is not None:
+            self.digital_twin_window.update_sac_action(0.0, 0.0)
+
+        scripted_worker = self.scripted_worker
+        if scripted_worker is not None:
+            scripted_worker.stop()
+            if scripted_worker.isRunning():
+                scripted_worker.wait(250)
+            if not scripted_worker.isRunning():
+                self.scripted_worker = None
+                self._restart_controller_after_stop = False
+            else:
+                self._restart_controller_after_stop = True
+
+        sac_worker = self.sac_worker
+        if sac_worker is not None:
+            sac_worker.set_action_sink(None)
+            sac_worker.stop()
+            if sac_worker.isRunning():
+                sac_worker.wait(500)
+            if not sac_worker.isRunning():
+                self.sac_worker = None
+                self._restart_controller_after_stop = False
+            else:
+                self._restart_controller_after_stop = True
+        self.btn_toggle_sac_agent.setText("START SAC AGENT")
+
+    def _on_scripted_action(self, vx_mm_s: float, vy_mm_s: float) -> None:
+        self.lbl_sac_action.setText(
+            f"Target Vx: {vx_mm_s:+.1f} mm/s    Target Vy: {vy_mm_s:+.1f} mm/s"
+        )
+        self._latest_action_mm_s = (vx_mm_s, vy_mm_s)
+        if self.digital_twin_window is not None:
+            self.digital_twin_window.update_sac_action(
+                -vy_mm_s / 1000.0, vx_mm_s / 1000.0
+            )
+
+    def _on_scripted_finished(self) -> None:
+        if self.sender() is not self.scripted_worker:
+            return
+        if self.scripted_worker is not None and not self.scripted_worker.isRunning():
+            self.scripted_worker = None
+        self.btn_toggle_sac_agent.setText("START SAC AGENT")
+        if self._restart_controller_after_stop:
+            self._restart_controller_after_stop = False
+            self._start_selected_controller()
+            return
+        if self.combo_controller.currentText() != "None (Idle)":
+            self.lbl_sac_status.setText("Controller stopped")
+
+    def _toggle_opcua_connection(self, connect: bool) -> None:
+        if connect:
+            if self.opcua_worker is not None:
+                self.lbl_opcua_status.setText(
+                    "OPC UA: Previous connection is still stopping"
+                )
+                self.btn_toggle_opcua.setChecked(False)
+                return
+            worker = OpcUaWorker(parent=self)
+            worker.connection_status.connect(self._on_opcua_status)
+            worker.error_occurred.connect(self._on_opcua_error)
+            worker.plc_pose_updated.connect(self._on_plc_pose_updated)
+            worker.plc_pose_validity_updated.connect(self._on_plc_pose_validity_updated)
+            worker.plc_status_updated.connect(self._on_plc_status_updated)
+            worker.zero_written.connect(self._on_opcua_zero_written)
+            worker.finished.connect(self._on_opcua_finished)
+            self.opcua_worker = worker
+            worker.start()
+            self.btn_toggle_opcua.setText("DISCONNECT OPC UA")
+            return
+
+        worker = self.opcua_worker
+        if worker is not None:
+            worker.stop()
+            self.lbl_opcua_status.setText("OPC UA: Disconnecting (sending zero)")
+        self._opcua_connected = False
+        self._pending_zero_revision = None
+        self.btn_toggle_opcua.setText("CONNECT OPC UA")
+
+    def _on_opcua_status(self, status: str) -> None:
+        self.lbl_opcua_status.setText(f"OPC UA: {status}")
+        if status.startswith("Connected"):
+            self._opcua_connected = True
+        elif status == "Disconnected":
+            self._opcua_connected = False
+            self._pending_zero_revision = None
+            self._start_selected_controller()
+
+    def _on_opcua_error(self, message: str) -> None:
+        self.lbl_opcua_status.setText(f"OPC UA error: {message}")
+
+    def _on_opcua_zero_written(self, revision: int) -> None:
+        if revision != self._pending_zero_revision:
+            return
+        self._pending_zero_revision = None
+        self._start_selected_controller()
+
+    def _on_opcua_finished(self) -> None:
+        if self.opcua_worker is not None and not self.opcua_worker.isRunning():
+            self.opcua_worker = None
+        self._opcua_connected = False
+        self._pending_zero_revision = None
+        self.btn_toggle_opcua.setChecked(False)
+        self.btn_toggle_opcua.setText("CONNECT OPC UA")
+        if self.lbl_opcua_status.text() == "OPC UA: Disconnected":
+            return
+        self.lbl_opcua_status.setText("OPC UA: Disconnected")
+
+    def _on_plc_pose_updated(self, x_mm: float, y_mm: float) -> None:
+        if self.live_worker is not None:
+            self.live_worker.sim_bridge.set_robot_position_mm(x_mm, y_mm)
+
+    def _on_plc_pose_validity_updated(self, valid: bool) -> None:
+        if not valid and self.live_worker is not None:
+            self.live_worker.sim_bridge.clear_robot_position_mm()
+
+    def _on_plc_status_updated(
+        self,
+        homed: bool,
+        tracking: bool,
+        has_error: bool,
+        state_text: str,
+    ) -> None:
+        self.lbl_plc_machine_status.setText(
+            f"PLC: Homed {'Yes' if homed else 'No'} | "
+            f"Tracking {'Yes' if tracking else 'No'} | "
+            f"Error {'Yes' if has_error else 'No'} | State {state_text}"
+        )
 
     def _offer_dummy_sac_model(self) -> bool:
         """Offer the bundled untrained model when no policy has been selected."""
@@ -522,28 +791,22 @@ class OrionLiveDashboard(QWidget):
         self.lbl_sac_model.setText(f"UNTRAINED TEST MODEL: {dummy_model_path.name}")
         return True
 
-    def _stop_sac_agent(self) -> None:
-        """Request agent shutdown and wait briefly for its control loop."""
-        worker = self.sac_worker
-        if worker is None:
-            return
-        worker.stop()
-        if worker.isRunning() and not worker.wait(500):
-            self.lbl_sac_status.setText("Waiting for SAC inference loop to stop")
-            return
-        self.sac_worker = None
-        self.btn_toggle_sac_agent.setText("START SAC AGENT")
-        self.lbl_sac_status.setText("Agent stopped")
-
     def _on_sac_action(self, target_vx: float, target_vy: float) -> None:
         """Forward actions to actuator adapters and refresh the GUI labels."""
         self._latest_sac_action = (target_vx, target_vy)
         self.sac_action_ready.emit(target_vx, target_vy)
-        self.lbl_sac_action.setText(
-            f"Target Vx: {target_vx:+.3f}    Target Vy: {target_vy:+.3f}"
+        vx_mm_s, vy_mm_s = limit_velocity(
+            target_vy * SACAgentWorker.MAX_ACTION_SPEED_MM_S,
+            -target_vx * SACAgentWorker.MAX_ACTION_SPEED_MM_S,
         )
+        self.lbl_sac_action.setText(
+            f"Target Vx: {vx_mm_s:+.1f} mm/s    Target Vy: {vy_mm_s:+.1f} mm/s"
+        )
+        self._latest_action_mm_s = (vx_mm_s, vy_mm_s)
         if self.digital_twin_window is not None:
-            self.digital_twin_window.update_sac_action(target_vx, target_vy)
+            self.digital_twin_window.update_sac_action(
+                -vy_mm_s / 1000.0, vx_mm_s / 1000.0
+            )
 
     def _on_sac_error(self, message: str) -> None:
         self.lbl_sac_status.setText(message)
@@ -552,6 +815,9 @@ class OrionLiveDashboard(QWidget):
         if self.sac_worker is not None and not self.sac_worker.isRunning():
             self.sac_worker = None
         self.btn_toggle_sac_agent.setText("START SAC AGENT")
+        if self._restart_controller_after_stop and self.sac_worker is None:
+            self._restart_controller_after_stop = False
+            self._start_selected_controller()
 
     # ──────────────────────────────────────────────────────────────────
     # Slots & event handlers
@@ -610,12 +876,14 @@ class OrionLiveDashboard(QWidget):
 
             if self._manual_table_calibrator.is_complete:
                 self._manual_table_calibrator.apply(worker.sim_bridge)
+                worker.sim_bridge.configure_physical_table_bounds()
                 self._save_table_calibration(
                     self._manual_table_calibrator.corners,
                     self._calibration_frame_size,
                 )
                 self._cancel_table_calibration()
                 self.status_label.setText("Tafelkalibratie opgeslagen.")
+                self._start_selected_controller()
                 return
 
             next_label = self._manual_table_calibrator.next_corner_label
@@ -673,13 +941,16 @@ class OrionLiveDashboard(QWidget):
             for point in scaled_corners:
                 self._manual_table_calibrator.add_corner(point)
             self._manual_table_calibrator.apply(worker.sim_bridge)
+            worker.sim_bridge.configure_physical_table_bounds()
             self._manual_table_calibrator.reset()
             self.status_label.setText("Opgeslagen tafelkalibratie geladen.")
+            self._start_selected_controller()
         except (KeyError, TypeError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
             self.status_label.setText(f"Opgeslagen tafelkalibratie ongeldig: {exc}")
 
     def _reset_table_corners(self) -> None:
         """Clear stored calibration and restore full-frame table bounds."""
+        self._stop_active_controller()
         self._settings.remove("table_calibration")
         self._settings.sync()
         self._manual_table_calibrator.reset()
@@ -713,8 +984,10 @@ class OrionLiveDashboard(QWidget):
             self.digital_twin_window = DigitalTwinWindow(bridge, self)
         else:
             self.digital_twin_window.update_bridge(bridge)
-        if self._latest_sac_action is not None:
-            self.digital_twin_window.update_sac_action(*self._latest_sac_action)
+        self.digital_twin_window.update_sac_action(
+            -self._latest_action_mm_s[1] / 1000.0,
+            self._latest_action_mm_s[0] / 1000.0,
+        )
         self.digital_twin_window.show()
         self.digital_twin_window.raise_()
         self.digital_twin_window.activateWindow()
@@ -780,6 +1053,14 @@ class OrionLiveDashboard(QWidget):
         self._stop_stream()
         if self.on_back:
             self.on_back()
+
+    def shutdown(self) -> None:
+        """Stop control, camera, and OPC UA workers before application exit."""
+        self._stop_stream()
+        worker = self.opcua_worker
+        if worker is not None:
+            worker.stop()
+            worker.wait(2500)
 
     def toggle_freeze(self) -> None:
         if self.live_worker and self.live_worker.isRunning():

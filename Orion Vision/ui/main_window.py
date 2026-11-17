@@ -121,3 +121,8 @@ class OrionMainWindow(QMainWindow):
         elif module_name == "playground":
             self._ensure_playground_dashboard()
             self.stack.setCurrentWidget(self.playground_dashboard_widget)
+
+    def closeEvent(self, event) -> None:
+        if self.live_dashboard_widget is not None:
+            self.live_dashboard_widget.shutdown()
+        super().closeEvent(event)

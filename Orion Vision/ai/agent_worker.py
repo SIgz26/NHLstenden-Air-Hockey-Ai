@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+import threading
 from collections.abc import Callable
 
 from ai.sac_controller import LiveSACController, check_sac_runtime
@@ -14,14 +15,15 @@ ActionSink = Callable[[float, float], None]
 class SACAgentWorker(QThread):
     """Run policy inference on a dedicated thread at a configured rate.
 
-    ``action_sink`` is an optional actuator adapter, such as a non-blocking
-    enqueue operation for a PLC/OPC UA worker. Do not perform synchronous
-    network I/O in the callback. Every predicted action is also emitted for
-    the GUI and external consumers.
+    ``action_sink`` receives the environment-scaled action in mm/s and should
+    be a non-blocking enqueue operation for an actuator adapter. Do not perform
+    synchronous network I/O in the callback. The normalized prediction is also
+    emitted for the GUI and external consumers.
     """
 
     action_updated = pyqtSignal(float, float)
     error_occurred = pyqtSignal(str)
+    MAX_ACTION_SPEED_MM_S = 2500.0
 
     def __init__(
         self,
@@ -36,7 +38,7 @@ class SACAgentWorker(QThread):
         self.controller = controller
         self._action_sink = action_sink
         self._period_ns = int(1_000_000_000 / frequency_hz)
-        self._running = False
+        self._stop_requested = threading.Event()
         self.completed_steps = 0
         self.deadline_misses = 0
 
@@ -46,7 +48,7 @@ class SACAgentWorker(QThread):
 
     def stop(self) -> None:
         """Request the inference loop to stop after its current iteration."""
-        self._running = False
+        self._stop_requested.set()
 
     def run(self) -> None:
         if self.controller.model is None:
@@ -58,17 +60,34 @@ class SACAgentWorker(QThread):
             self.error_occurred.emit("No SAC model is loaded")
             return
 
-        self._running = True
         deadline_ns = time.perf_counter_ns()
-        while self._running:
+        while not self._stop_requested.is_set():
             try:
-                target_vx, target_vy = self.controller.predict_action()
+                bridge = self.controller.sim_bridge
+                if (
+                    bridge.physical_table_calibrated
+                    and bridge.has_fresh_puck_detection(max_age_s=0.25)
+                ):
+                    target_vx, target_vy = self.controller.predict_action()
+                else:
+                    target_vx = target_vy = 0.0
                 action_sink = self._action_sink
                 if action_sink is not None:
-                    action_sink(target_vx, target_vy)
+                    action_sink(
+                        target_vy * self.MAX_ACTION_SPEED_MM_S,
+                        -target_vx * self.MAX_ACTION_SPEED_MM_S,
+                    )
                 self.action_updated.emit(target_vx, target_vy)
                 self.completed_steps += 1
             except Exception as exc:
+                action_sink = self._action_sink
+                if action_sink is not None:
+                    try:
+                        action_sink(0.0, 0.0)
+                    except Exception as stop_exc:
+                        self.error_occurred.emit(
+                            f"SAC safe-stop enqueue failed: {stop_exc}"
+                        )
                 self.error_occurred.emit(f"SAC inference stopped: {exc}")
                 break
 
@@ -81,4 +100,3 @@ class SACAgentWorker(QThread):
                 self.deadline_misses += 1
                 if -remaining_ns >= self._period_ns:
                     deadline_ns = now_ns
-        self._running = False

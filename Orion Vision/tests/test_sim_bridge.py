@@ -161,36 +161,36 @@ def test_velocity_along_tilted_table_edge_is_rectified():
     assert abs(float(vector[3])) < 1e-5
 
 
-def test_puck_trajectory_reflects_from_top_and_bottom_wall():
+def test_puck_trajectory_reflects_from_left_and_right_wall():
     bridge = SimBridge(
         x_bounds=(0.0, 2.0),
         y_bounds=(0.0, 2.0),
         sim_dt=1.0,
         invert_y=False,
     )
-    bridge.update(1.0, 1.0, 0.0, 0.8, frame_rate=1.0)
+    bridge.update(1.0, 1.0, 0.8, 0.0, frame_rate=1.0)
 
     trajectory = bridge.predict_puck_trajectory(max_bounces=3, time_horizon=2.0)
 
     np.testing.assert_allclose(
         trajectory,
-        [(0.0, 0.0), (0.0, 1.0), (0.0, 0.4)],
+        [(0.0, 0.0), (1.0, 0.0), (0.4, 0.0)],
         atol=1e-6,
     )
 
 
-def test_puck_trajectory_stops_at_goal_line():
+def test_puck_trajectory_stops_at_top_or_bottom_goal_line():
     bridge = SimBridge(
         x_bounds=(0.0, 2.0),
         y_bounds=(0.0, 2.0),
         sim_dt=1.0,
         invert_y=False,
     )
-    bridge.update(1.0, 1.0, 0.5, 0.0, frame_rate=1.0)
+    bridge.update(1.0, 1.0, 0.0, 0.5, frame_rate=1.0)
 
     trajectory = bridge.predict_puck_trajectory(time_horizon=5.0)
 
-    np.testing.assert_allclose(trajectory, [(0.0, 0.0), (1.0, 0.0)], atol=1e-6)
+    np.testing.assert_allclose(trajectory, [(0.0, 0.0), (0.0, 1.0)], atol=1e-6)
 
 
 def test_puck_trajectory_respects_max_bounces():
@@ -200,12 +200,12 @@ def test_puck_trajectory_respects_max_bounces():
         sim_dt=1.0,
         invert_y=False,
     )
-    bridge.update(5.0, 1.0, 0.0, 0.8, frame_rate=1.0)
+    bridge.update(5.0, 1.0, 0.8, 0.0, frame_rate=1.0)
 
     trajectory = bridge.predict_puck_trajectory(max_bounces=1, time_horizon=10.0)
 
     assert len(trajectory) == 2
-    np.testing.assert_allclose(trajectory[-1], (0.0, 1.0), atol=1e-6)
+    np.testing.assert_allclose(trajectory[-1], (1.0, 0.0), atol=1e-6)
 
 
 def test_opponent_velocity_is_estimated_in_normalized_table_units(monkeypatch):

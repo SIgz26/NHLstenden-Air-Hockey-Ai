@@ -394,9 +394,11 @@ class LiveCameraWorker(QThread):
 
             # --- Detection ---
             result = frame.copy()
+            engine_result = None
             if hasattr(self, "engine") and self.engine is not None:
                 try:
                     result, mask = self.engine.process_frame(frame)
+                    engine_result = self.engine.last_result
                 except Exception:
                     result = frame.copy()
                     self._detect_and_draw(mask, result)
@@ -405,7 +407,7 @@ class LiveCameraWorker(QThread):
 
             if self.engine is not None:
                 self.sim_bridge.update_from_engine(
-                    self.engine.last_result,
+                    engine_result,
                     frame_width=frame.shape[1],
                     frame_height=frame.shape[0],
                     frame_rate=float(getattr(self.engine, "ESTIMATED_FPS", 30.0)),
