@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 from PyQt5.QtCore import QPointF, QRectF, Qt, QTimer
-from PyQt5.QtGui import QColor, QPaintEvent, QPainter, QPen, QPolygonF
+from PyQt5.QtGui import QColor, QFont, QPaintEvent, QPainter, QPen, QPolygonF
 from PyQt5.QtWidgets import QDialog, QVBoxLayout, QSizePolicy, QWidget
 
 if TYPE_CHECKING:
@@ -94,9 +94,7 @@ class DigitalTwinWidget(QWidget):
         if field.width() <= 0.0 or field.height() <= 0.0:
             return None
 
-        robot_x = float(self._observation[6])
-        robot_y = float(self._observation[7])
-        robot_center = self._field_point(field, robot_x, robot_y)
+        robot_center = self._robot_point(field)
         vx, vy = self._sac_action
 
         vx_length = self._visible_vector_length(vx)
@@ -106,15 +104,15 @@ class DigitalTwinWidget(QWidget):
 
         vx_endpoint = self._clip_to_field(
             field,
-            QPointF(robot_center.x() + np.sign(vx) * vx_length, robot_center.y()),
+            QPointF(robot_center.x(), robot_center.y() - np.sign(vx) * vx_length),
         )
         vy_endpoint = self._clip_to_field(
             field,
-            QPointF(robot_center.x(), robot_center.y() - np.sign(vy) * vy_length),
+            QPointF(robot_center.x() + np.sign(vy) * vy_length, robot_center.y()),
         )
 
-        result_direction_x = vx / result_speed if result_speed > 0.0 else 0.0
-        result_direction_y = vy / result_speed if result_speed > 0.0 else 0.0
+        result_direction_x = vy / result_speed if result_speed > 0.0 else 0.0
+        result_direction_y = -vx / result_speed if result_speed > 0.0 else 0.0
         resultant_endpoint = self._clip_to_field(
             field,
             QPointF(
@@ -144,6 +142,12 @@ class DigitalTwinWidget(QWidget):
         """Return the exact radius used by the painted robot mallet."""
         return max(9.0, min(field.width(), field.height()) * 0.075)
 
+    def _robot_point(self, field: QRectF) -> QPointF:
+        """Map PLC-Y across the field and PLC-X from side to side."""
+        return self._field_point(
+            field, float(self._observation[7]), float(self._observation[6])
+        )
+
     def get_action_endpoint_clearances(
         self, field: QRectF | None = None
     ) -> tuple[float, float, float] | None:
@@ -152,9 +156,7 @@ class DigitalTwinWidget(QWidget):
         endpoints = self.get_action_vector_endpoints(field)
         if endpoints is None:
             return None
-        robot_center = self._field_point(
-            field, float(self._observation[6]), float(self._observation[7])
-        )
+        robot_center = self._robot_point(field)
         return tuple(
             float(np.hypot(point.x() - robot_center.x(), point.y() - robot_center.y()))
             for point in endpoints
@@ -235,6 +237,39 @@ class DigitalTwinWidget(QWidget):
             center_circle_radius,
             center_circle_radius,
         )
+
+        observation_text = (
+            f"Robot obs: [{self._observation[6]:.3f}, "
+            f"{self._observation[7]:.3f}]"
+        )
+        status_lines = [observation_text]
+        if self._sim_bridge is not None:
+            plc_pose = self._sim_bridge._plc_robot_pose_mm
+            if plc_pose is None:
+                plc_text = "PLC: geen pose ontvangen"
+            else:
+                plc_text = f"PLC: X={plc_pose[0]:.1f}, Y={plc_pose[1]:.1f} mm"
+            calibration = (
+                "actief"
+                if self._sim_bridge.physical_table_calibrated
+                else "inactief"
+            )
+            status_lines.append(f"{plc_text} | tabelkalibratie: {calibration}")
+
+        painter.save()
+        painter.setFont(QFont(self.font().family(), 8))
+        painter.setPen(QColor("#9aafa7"))
+        painter.drawText(
+            QRectF(
+                field.left() + 8.0,
+                field.top() + 7.0,
+                field.width() - 16.0,
+                32.0,
+            ),
+            Qt.AlignLeft | Qt.AlignTop,
+            "\n".join(status_lines),
+        )
+        painter.restore()
 
         goal_width = field.width() * 0.055
         goal_height = field.height() * 0.32
@@ -319,7 +354,7 @@ class DigitalTwinWidget(QWidget):
         painter.setBrush(QColor("#d94f45"))
         painter.drawEllipse(opponent_center, opponent_radius, opponent_radius)
 
-        robot_center = self._field_point(field, self._observation[6], self._observation[7])
+        robot_center = self._robot_point(field)
         robot_radius = self._robot_marker_radius(field)
         painter.setPen(QPen(QColor("#56cfe1"), 2.0))
         painter.setBrush(QColor(25, 91, 101, 180))
