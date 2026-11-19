@@ -1,6 +1,7 @@
 import os
 import sys
 import time
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 
@@ -23,14 +24,22 @@ from core.table_overlay import draw_table_overlay
 class LiveCameraWorker(QThread):
     """
     Background thread that captures camera frames, applies HSV-based
-    blob detection with Kalman filtering, and emits processed pixmaps.
+    blob detection with Kalman filtering, and emits throttled preview frames.
     """
 
-    frame_processed = pyqtSignal(QPixmap, QPixmap)  # (Result, Mask)
+    frame_processed = pyqtSignal(object, object)  # BGR result and mask arrays for UI conversion
     status_signal = pyqtSignal(str)
+    cycle_metrics_updated = pyqtSignal(float, float, float)
 
     # Tuning constants – centralised so they're easy to adjust
-    FRAME_SLEEP_MS = 15
+    MAX_CAMERA_FPS = 90.0
+    MAX_PREVIEW_FPS = 30.0
+    CALIBRATION_MARKER_ID = 0
+    CALIBRATION_MARKER_INTERVAL_S = 0.1
+    CALIBRATION_MARKER_MAX_AGE_S = 0.15
+    CALIBRATION_MAX_ROBOT_SPEED_MM_S = 30.0
+    # V4L2 exposure units are 100 us; DirectShow uses log2 seconds.
+    SHORT_EXPOSURE_VALUE = 80.0 if sys.platform.startswith("linux") else -7.0
     PAUSE_SLEEP_MS = 50
     SCORE_DISTANCE_WEIGHT = 0.35
     SCORE_CIRCULARITY_WEIGHT = 120
@@ -47,12 +56,19 @@ class LiveCameraWorker(QThread):
         self.record_output_dir = None
         self.record_path = None
         self.record_writer = None
-        self.target_fps = 20.0
+        self.target_fps = self.MAX_CAMERA_FPS
         self.record_fps = 20.0
         self._fps = 0.0
         self._frame_counter = 0
         self._fps_last_update = time.monotonic()
         self._last_capture_time = time.monotonic()
+        self._last_preview_time = 0.0
+        self._frame_timestamps: deque[float] = deque(maxlen=30)
+        self._capture_times_ms: deque[float] = deque(maxlen=60)
+        self._vision_times_ms: deque[float] = deque(maxlen=60)
+        self._capture_ms_avg = 0.0
+        self._vision_ms_avg = 0.0
+        self._capture_fps = 0.0
 
         # Separate lock for the HSV frame so reads in the GUI thread
         # do not block camera captures longer than necessary.
@@ -73,6 +89,28 @@ class LiveCameraWorker(QThread):
         self.engine = self._build_engine(self.engine_name)
         self.sim_bridge = SimBridge()
         self.aruco_tracker = ArUcoMalletTracker()
+        self._aruco_dictionary = cv2.aruco.getPredefinedDictionary(
+            cv2.aruco.DICT_4X4_50
+        )
+        if hasattr(cv2.aruco, "ArucoDetector"):
+            parameters = cv2.aruco.DetectorParameters()
+            self._calibration_marker_detector = cv2.aruco.ArucoDetector(
+                self._aruco_dictionary, parameters
+            )
+            self._calibration_marker_parameters = None
+        else:
+            self._calibration_marker_detector = None
+            if hasattr(cv2.aruco, "DetectorParameters"):
+                self._calibration_marker_parameters = (
+                    cv2.aruco.DetectorParameters()
+                )
+            else:
+                self._calibration_marker_parameters = (
+                    cv2.aruco.DetectorParameters_create()
+                )
+        self._last_calibration_marker_scan = 0.0
+        self._last_calibration_marker_corners: np.ndarray | None = None
+        self._last_calibration_marker_time = 0.0
         self.show_table_overlay = True
         self._table_calibration_preview: tuple[tuple[float, float], ...] = ()
 
@@ -318,7 +356,7 @@ class LiveCameraWorker(QThread):
 
     def set_target_fps(self, fps: float | int) -> None:
         with QMutexLocker(self._mutex):
-            self.target_fps = max(1.0, min(float(fps), 60.0))
+            self.target_fps = max(1.0, min(float(fps), self.MAX_CAMERA_FPS))
 
     def set_record_fps(self, fps: float | int) -> None:
         with QMutexLocker(self._mutex):
@@ -345,6 +383,24 @@ class LiveCameraWorker(QThread):
             f"Camera {self.camera_index} connected & active"
         )
 
+        with QMutexLocker(self._mutex):
+            target_fps = self.target_fps
+        fps_supported = cap.set(cv2.CAP_PROP_FPS, target_fps)
+        exposure_supported = False
+        manual_exposure = True
+        if hasattr(cv2, "CAP_PROP_AUTO_EXPOSURE"):
+            manual_exposure = cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)
+        if manual_exposure and hasattr(cv2, "CAP_PROP_EXPOSURE"):
+            exposure_supported = cap.set(
+                cv2.CAP_PROP_EXPOSURE, self.SHORT_EXPOSURE_VALUE
+            )
+        self.status_signal.emit(
+            f"Camera target {target_fps:.0f} FPS "
+            f"({'accepted' if fps_supported else 'not confirmed'}), "
+            f"short exposure "
+            f"{'accepted' if exposure_supported else 'unsupported/not confirmed'}"
+        )
+
         while self.running:
             # --- Pause guard ---
             with QMutexLocker(self._mutex):
@@ -354,22 +410,36 @@ class LiveCameraWorker(QThread):
                 self.msleep(self.PAUSE_SLEEP_MS)
                 continue
 
-            target_interval = 1.0 / self.target_fps if self.target_fps > 0 else 0.0
+            with QMutexLocker(self._mutex):
+                target_fps = self.target_fps
+            target_interval = 1.0 / target_fps if target_fps > 0 else 0.0
             if target_interval > 0:
                 now = time.monotonic()
                 elapsed = now - self._last_capture_time
                 if elapsed < target_interval:
-                    self.msleep(max(1, int((target_interval - elapsed) * 1000)))
+                    self.usleep(max(1, int((target_interval - elapsed) * 1_000_000)))
                     continue
                 self._last_capture_time = now
 
             # --- Capture ---
+            capture_start = time.perf_counter()
             ret, frame = cap.read()
+            capture_elapsed_ms = (time.perf_counter() - capture_start) * 1000.0
             if not ret:
                 self.status_signal.emit("Error: No frame received from camera")
                 self.msleep(100)
                 continue
 
+            captured_at = time.monotonic()
+            self._frame_timestamps.append(captured_at)
+            if len(self._frame_timestamps) > 1:
+                capture_span = self._frame_timestamps[-1] - self._frame_timestamps[0]
+                if capture_span > 0.0:
+                    self._capture_fps = (
+                        len(self._frame_timestamps) - 1
+                    ) / capture_span
+
+            vision_start = time.perf_counter()
             # --- Pre-processing ---
             frame = self._apply_fisheye_correction(frame)
             robot_position, opponent_position = self.aruco_tracker.detect_mallets(frame)
@@ -405,12 +475,13 @@ class LiveCameraWorker(QThread):
             else:
                 self._detect_and_draw(mask, result)
 
+            self._update_calibration_marker(frame, result)
             if self.engine is not None:
                 self.sim_bridge.update_from_engine(
                     engine_result,
                     frame_width=frame.shape[1],
                     frame_height=frame.shape[0],
-                    frame_rate=float(getattr(self.engine, "ESTIMATED_FPS", 30.0)),
+                    frame_rate=self._capture_fps or target_fps,
                 )
             self.sim_bridge.update_telemetry(
                 robot_position=robot_position,
@@ -421,6 +492,11 @@ class LiveCameraWorker(QThread):
                 self._table_calibration_preview or self.sim_bridge.get_table_corners(),
                 enabled=self.show_table_overlay or bool(self._table_calibration_preview),
             )
+            vision_elapsed_ms = (time.perf_counter() - vision_start) * 1000.0
+            self._capture_times_ms.append(capture_elapsed_ms)
+            self._vision_times_ms.append(vision_elapsed_ms)
+            self._capture_ms_avg = float(np.mean(self._capture_times_ms))
+            self._vision_ms_avg = float(np.mean(self._vision_times_ms))
 
             if self.recording:
                 if self.record_writer is None:
@@ -452,22 +528,23 @@ class LiveCameraWorker(QThread):
                 self._fps = self._frame_counter / elapsed
                 self._frame_counter = 0
                 self._fps_last_update = now
-                self.status_signal.emit(f"Live FPS: {self._fps:.1f}")
+                self.status_signal.emit(
+                    f"Vision {self._fps:.1f} FPS | capture avg "
+                    f"{self._capture_ms_avg:.2f} ms | processing avg "
+                    f"{self._vision_ms_avg:.2f} ms"
+                )
+                self.cycle_metrics_updated.emit(
+                    self._capture_ms_avg, self._vision_ms_avg, self._fps
+                )
 
-            # --- Emit ---
-            pixmap_result = self._mat_to_pixmap(result)
-            
-            # Veilige conversie voor het masker/secondary beeld naar BGR voor de QPixmap
-            if len(mask.shape) == 2:
-                mask_bgr = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
-            elif mask.shape[2] == 1:
-                mask_bgr = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
-            else:
-                mask_bgr = mask
-
-            pixmap_mask = self._mat_to_pixmap(mask_bgr)
-            self.frame_processed.emit(pixmap_result, pixmap_mask)
-            self.msleep(self.FRAME_SLEEP_MS)
+            preview_interval = 1.0 / self.MAX_PREVIEW_FPS
+            if now - self._last_preview_time >= preview_interval:
+                if len(mask.shape) == 2 or mask.shape[2] == 1:
+                    mask_preview = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+                else:
+                    mask_preview = mask
+                self.frame_processed.emit(result.copy(), mask_preview.copy())
+                self._last_preview_time = now
 
         cap.release()
         self.status_signal.emit("Camera stopped")
@@ -475,6 +552,65 @@ class LiveCameraWorker(QThread):
     # ------------------------------------------------------------------
     # Detection helpers
     # ------------------------------------------------------------------
+
+    def _update_calibration_marker(
+        self, frame: np.ndarray, result: np.ndarray
+    ) -> None:
+        """Detect and display robot marker ID 0 at no more than 10 Hz."""
+        now = time.monotonic()
+        robot_speed = self.sim_bridge.plc_robot_speed_mm_s
+        can_scan = (
+            robot_speed is not None
+            and robot_speed < self.CALIBRATION_MAX_ROBOT_SPEED_MM_S
+            and now - self._last_calibration_marker_scan
+            >= self.CALIBRATION_MARKER_INTERVAL_S
+        )
+        if can_scan:
+            self._last_calibration_marker_scan = now
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            if self._calibration_marker_detector is not None:
+                corners, ids, _ = (
+                    self._calibration_marker_detector.detectMarkers(gray)
+                )
+            else:
+                corners, ids, _ = cv2.aruco.detectMarkers(
+                    gray,
+                    self._aruco_dictionary,
+                    parameters=self._calibration_marker_parameters,
+                )
+
+            marker_corners = None
+            if ids is not None:
+                for detected_corners, marker_id in zip(
+                    corners, ids.reshape(-1)
+                ):
+                    if int(marker_id) == self.CALIBRATION_MARKER_ID:
+                        marker_corners = np.asarray(
+                            detected_corners, dtype=np.float32
+                        ).reshape(4, 2)
+                        break
+
+            self._last_calibration_marker_corners = marker_corners
+            if marker_corners is not None:
+                self._last_calibration_marker_time = now
+                center = marker_corners.mean(axis=0)
+                self.sim_bridge.update_mallet_bias(
+                    float(center[0]),
+                    float(center[1]),
+                    max_speed_mm_s=self.CALIBRATION_MAX_ROBOT_SPEED_MM_S,
+                )
+
+        marker_corners = self._last_calibration_marker_corners
+        if (
+            marker_corners is None
+            or now - self._last_calibration_marker_time
+            > self.CALIBRATION_MARKER_MAX_AGE_S
+        ):
+            return
+        polygon = np.rint(marker_corners).astype(np.int32).reshape(-1, 1, 2)
+        center = tuple(np.rint(marker_corners.mean(axis=0)).astype(int))
+        cv2.polylines(result, [polygon], True, (0, 200, 0), 1, cv2.LINE_AA)
+        cv2.circle(result, center, 3, (0, 220, 220), -1, cv2.LINE_AA)
 
     def _best_contour_candidate(
         self, contours: list

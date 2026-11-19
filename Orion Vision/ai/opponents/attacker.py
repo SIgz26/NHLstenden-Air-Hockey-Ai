@@ -31,9 +31,21 @@ class ComplexOpponent(BaseOpponent):
     PUCK_RADIUS = 0.031
     WALL_MARGIN = 0.01
     
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        max_speed: float = 3.5,
+        kp_scale: float = 1.0,
+        min_x_ratio: float = 0.0,
+        strike_px_min: float = 0.1,
+        strike_vx_threshold: float = -0.8,
+    ) -> None:
         self.state = "DEFEND"
         self.last_target = np.array([0.0, 0.0])
+        self.max_speed = max_speed
+        self.kp_scale = kp_scale
+        self.min_x_ratio = min_x_ratio
+        self.strike_px_min = strike_px_min
+        self.strike_vx_threshold = strike_vx_threshold
 
     def _predict_puck_intercept(
         self,
@@ -76,7 +88,8 @@ class ComplexOpponent(BaseOpponent):
         # Constanten en grenzen
         half_len = field_length / 2.0
         y_limit = (field_width / 2.0) - mallet_radius
-        x_min, x_max = mallet_radius, half_len - mallet_radius
+        x_min = max(mallet_radius, half_len * self.min_x_ratio)
+        x_max = half_len - mallet_radius
         
         px, py = puck_pos
         vx, vy = puck_vel
@@ -88,7 +101,7 @@ class ComplexOpponent(BaseOpponent):
         # Bepaal staat met hysterese
         if px > ox - 0.02: 
             self.state = "RETREAT"
-        elif px > 0.1 and vx > -0.8:
+        elif px > self.strike_px_min and vx > self.strike_vx_threshold:
             self.state = "STRIKE"
         else:
             self.state = "DEFEND"
@@ -152,6 +165,8 @@ class ComplexOpponent(BaseOpponent):
             kp = 10.0
             max_speed = 2.2
 
+        kp *= self.kp_scale
+        max_speed = min(max_speed, self.max_speed)
         desired_vel = diff * kp
         
         # Vectoriale snelheidsbegrenzing

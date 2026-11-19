@@ -7,6 +7,7 @@ import threading
 from collections.abc import Callable
 
 from ai.sac_controller import LiveSACController, check_sac_runtime
+from core.opcua_worker import limit_velocity
 from PyQt5.QtCore import QThread, pyqtSignal
 
 ActionSink = Callable[[float, float], None]
@@ -46,6 +47,16 @@ class SACAgentWorker(QThread):
         """Set the non-blocking action consumer used by an actuator adapter."""
         self._action_sink = action_sink
 
+    @classmethod
+    def _to_plc_velocity(
+        cls, target_vx: float, target_vy: float
+    ) -> tuple[float, float]:
+        """Convert policy actions to PLC axes and apply the PLC velocity limits."""
+        return limit_velocity(
+            target_vy * cls.MAX_ACTION_SPEED_MM_S,
+            -target_vx * cls.MAX_ACTION_SPEED_MM_S,
+        )
+
     def stop(self) -> None:
         """Request the inference loop to stop after its current iteration."""
         self._stop_requested.set()
@@ -73,10 +84,7 @@ class SACAgentWorker(QThread):
                     target_vx = target_vy = 0.0
                 action_sink = self._action_sink
                 if action_sink is not None:
-                    action_sink(
-                        target_vy * self.MAX_ACTION_SPEED_MM_S,
-                        -target_vx * self.MAX_ACTION_SPEED_MM_S,
-                    )
+                    action_sink(*self._to_plc_velocity(target_vx, target_vy))
                 self.action_updated.emit(target_vx, target_vy)
                 self.completed_steps += 1
             except Exception as exc:

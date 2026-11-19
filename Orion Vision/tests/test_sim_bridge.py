@@ -220,6 +220,108 @@ def test_opponent_velocity_is_estimated_in_normalized_table_units(monkeypatch):
     np.testing.assert_allclose(bridge.get_opponent_velocity(), (2.0, 1.0), atol=1e-6)
 
 
+def _calibrated_bias_bridge(monkeypatch):
+    bridge = SimBridge(invert_y=False)
+    bridge.set_table_corners(
+        top_left=(0.0, 0.0),
+        top_right=(1020.0, 0.0),
+        bottom_right=(1020.0, 1940.0),
+        bottom_left=(0.0, 1940.0),
+    )
+    bridge.configure_physical_table_bounds()
+    current_time = [1.0]
+    monkeypatch.setattr("core.sim_bridge.time.monotonic", lambda: current_time[0])
+    bridge.set_robot_position_mm(-46.35, 53.7)
+    current_time[0] += 0.1
+    bridge.set_robot_position_mm(-46.35, 53.7)
+    return bridge, current_time
+
+
+def test_mallet_bias_updates_at_rest_and_corrects_opponent_puck_state(monkeypatch):
+    bridge, _current_time = _calibrated_bias_bridge(monkeypatch)
+    bridge.update(530.0, 990.0, 0.0, 0.0, frame_rate=30.0)
+
+    assert bridge.update_mallet_bias(520.0, 980.0)
+    np.testing.assert_allclose(bridge.calibration_offset_mm, (0.5, 0.5))
+
+    physical_state = bridge.get_opponent_physical_state()
+    assert physical_state is not None
+    puck_pos_m, _puck_vel_mps, _robot_pos_m = physical_state
+    np.testing.assert_allclose(puck_pos_m, (0.0195, 0.0195), atol=1e-6)
+
+
+def test_mallet_bias_is_frozen_at_or_above_robot_speed_threshold(monkeypatch):
+    bridge, current_time = _calibrated_bias_bridge(monkeypatch)
+    current_time[0] += 0.1
+    bridge.set_robot_position_mm(-43.25, 53.7)
+
+    assert bridge.plc_robot_speed_mm_s >= 30.0
+    assert not bridge.update_mallet_bias(520.0, 980.0)
+    np.testing.assert_array_equal(bridge.calibration_offset_mm, (0.0, 0.0))
+
+
+def test_mallet_bias_is_clamped_to_fifteen_millimeters(monkeypatch):
+    bridge, _current_time = _calibrated_bias_bridge(monkeypatch)
+
+    for _ in range(100):
+        assert bridge.update_mallet_bias(2000.0, -1000.0)
+
+    np.testing.assert_array_equal(bridge.calibration_offset_mm, (15.0, -15.0))
+
+
+def test_robot_trim_converts_between_plc_and_table_coordinates(monkeypatch):
+    bridge, _current_time = _calibrated_bias_bridge(monkeypatch)
+    bridge.set_robot_trim_mm(10.0, -5.0)
+    bridge.update(510.0, 970.0, 0.0, 0.0, frame_rate=30.0)
+
+    np.testing.assert_allclose(bridge.robot_position_mm(), (-10.0, 5.0))
+    np.testing.assert_allclose(
+        bridge.physical_target_to_plc_mm(20.0, 40.0),
+        (-16.35, 88.7),
+    )
+    observation = bridge.get_observation_vector()
+    expected_robot_x = 2.0 * (-56.35 - bridge.PLC_X_BOUNDS_MM[0]) / (
+        bridge.PLC_X_BOUNDS_MM[1] - bridge.PLC_X_BOUNDS_MM[0]
+    ) - 1.0
+    expected_robot_y = 2.0 * (58.7 - bridge.PLC_Y_BOUNDS_MM[0]) / (
+        bridge.PLC_Y_BOUNDS_MM[1] - bridge.PLC_Y_BOUNDS_MM[0]
+    ) - 1.0
+    np.testing.assert_allclose(observation[6:8], (expected_robot_x, expected_robot_y))
+
+    physical_state = bridge.get_opponent_physical_state()
+    assert physical_state is not None
+    robot_pos_m = physical_state[2]
+    np.testing.assert_allclose(robot_pos_m, (0.005, -0.01))
+
+
+def test_puck_trim_shifts_puck_observation_without_changing_velocity():
+    bridge = SimBridge(sim_dt=1.0 / 60.0, invert_y=False)
+    bridge.set_table_corners(
+        top_left=(0.0, 0.0),
+        top_right=(100.0, 0.0),
+        bottom_right=(100.0, 100.0),
+        bottom_left=(0.0, 100.0),
+    )
+    bridge.configure_physical_table_bounds()
+    untrimmed = bridge.update(50.0, 50.0, 0.5, 0.25, frame_rate=10.0)
+    bridge.set_puck_trim_mm(10.0, -5.0)
+    trimmed = bridge.get_observation_vector()
+
+    np.testing.assert_allclose(trimmed[:2], (10.0 / 510.0, -10.0 / 1940.0), atol=1e-6)
+    np.testing.assert_allclose(trimmed[2:4], untrimmed[2:4], atol=1e-6)
+
+
+def test_robot_and_puck_trims_are_clamped_to_thirty_five_millimeters():
+    bridge = SimBridge()
+    bridge.set_robot_trim_mm(45.0, -50.0)
+    bridge.set_puck_trim_mm(-40.0, 35.0)
+
+    assert (bridge.robot_trim_x_mm, bridge.robot_trim_y_mm) == (35.0, -35.0)
+    assert (bridge.puck_trim_x_mm, bridge.puck_trim_y_mm) == (-35.0, 35.0)
+
+
+
+
 if __name__ == "__main__":
     import pytest
 

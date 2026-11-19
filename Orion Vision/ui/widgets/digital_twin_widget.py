@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import numpy as np
-from PyQt5.QtCore import QPointF, QRectF, Qt, QTimer
+from PyQt5.QtCore import QPointF, QRectF, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QFont, QPaintEvent, QPainter, QPen, QPolygonF
 from PyQt5.QtWidgets import QDialog, QVBoxLayout, QSizePolicy, QWidget
 
@@ -30,6 +30,7 @@ class DigitalTwinWidget(QWidget):
     ACTION_PIXELS_PER_MPS = 100.0
     MIN_ACTION_VECTOR_PIXELS = 40.0
     MIN_VISIBLE_ACTION_MPS = 0.01
+    manual_target_requested = pyqtSignal(float, float)
 
     def __init__(
         self,
@@ -42,6 +43,10 @@ class DigitalTwinWidget(QWidget):
         self._external_observation = False
         self._observation = np.zeros(12, dtype=np.float32)
         self._sac_action: tuple[float, float] | None = None
+        self._manual_control_enabled = False
+        self._dragging_robot = False
+        self._drag_offset = QPointF()
+        self._manual_target_point: QPointF | None = None
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._refresh_observation)
         self.setMinimumSize(180, 150)
@@ -77,6 +82,111 @@ class DigitalTwinWidget(QWidget):
         if not np.isfinite((vx, vy)).all():
             return
         self._sac_action = (float(vx), float(vy))
+        self.update()
+
+    def set_manual_control_enabled(self, enabled: bool) -> None:
+        """Enable mouse dragging of the mallet for the manual controller."""
+        self._manual_control_enabled = bool(enabled)
+        self._dragging_robot = False
+        self._manual_target_point = None
+        self.setMouseTracking(enabled)
+        self.setCursor(Qt.OpenHandCursor if enabled else Qt.ArrowCursor)
+        self.update()
+
+    def _table_target_from_point(
+        self, point: QPointF, field: QRectF | None = None
+    ) -> tuple[float, float] | None:
+        """Convert a mouse position on the robot half into safe table mm."""
+        bridge = self._sim_bridge
+        field = field or self._field_rect()
+        if (
+            bridge is None
+            or not bridge.physical_table_calibrated
+            or field.width() <= 0.0
+            or field.height() <= 0.0
+        ):
+            return None
+
+        screen_x = float(
+            np.clip(
+                2.0 * (point.x() - field.left()) / field.width() - 1.0,
+                -1.0,
+                0.0,
+            )
+        )
+        screen_y = float(
+            np.clip(
+                1.0 - 2.0 * (point.y() - field.top()) / field.height(),
+                -1.0,
+                1.0,
+            )
+        )
+        plc_x_span = bridge.PLC_X_BOUNDS_MM[1] - bridge.PLC_X_BOUNDS_MM[0]
+        plc_y_span = bridge.PLC_Y_BOUNDS_MM[1] - bridge.PLC_Y_BOUNDS_MM[0]
+        return (
+            screen_y * plc_x_span / 2.0,
+            -screen_x * plc_y_span,
+        )
+
+    def mousePressEvent(self, event) -> None:
+        if (
+            self._manual_control_enabled
+            and event.button() == Qt.LeftButton
+            and self._sim_bridge is not None
+            and self._sim_bridge.physical_table_calibrated
+        ):
+            field = self._field_rect()
+            click = QPointF(event.pos())
+            robot = self._robot_point(field)
+            hit_radius = self._robot_marker_radius(field) * 1.8
+            if (
+                field.contains(click)
+                and click.x() <= field.center().x()
+                and np.hypot(click.x() - robot.x(), click.y() - robot.y())
+                <= hit_radius
+            ):
+                self._dragging_robot = True
+                self._drag_offset = robot - click
+                self.setCursor(Qt.ClosedHandCursor)
+                self._move_manual_target(click + self._drag_offset, field)
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if self._manual_control_enabled and self._dragging_robot:
+            self._move_manual_target(
+                QPointF(event.pos()) + self._drag_offset,
+                self._field_rect(),
+            )
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if self._dragging_robot and event.button() == Qt.LeftButton:
+            if self._manual_control_enabled:
+                self._move_manual_target(
+                    QPointF(event.pos()) + self._drag_offset,
+                    self._field_rect(),
+                )
+            self._dragging_robot = False
+            if self._manual_control_enabled:
+                self.setCursor(Qt.OpenHandCursor)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def _move_manual_target(self, point: QPointF, field: QRectF) -> None:
+        target_point = QPointF(
+            float(np.clip(point.x(), field.left(), field.center().x())),
+            float(np.clip(point.y(), field.top(), field.bottom())),
+        )
+        target = self._table_target_from_point(target_point, field)
+        if target is None:
+            return
+        self._manual_target_point = target_point
+        self.manual_target_requested.emit(*target)
         self.update()
 
     def get_action_vector_endpoints(
@@ -199,6 +309,11 @@ class DigitalTwinWidget(QWidget):
             field.top() + (1.0 - y) * field.height() / 2.0,
         )
 
+    @classmethod
+    def _puck_point(cls, field: QRectF, puck_x: float, puck_y: float) -> QPointF:
+        """Map length Y to screen X and width X to screen Y, like the robot."""
+        return cls._field_point(field, x=puck_y, y=puck_x)
+
     def _field_rect(self) -> QRectF:
         """Return a centered landscape field rectangle without stretching."""
         available = QRectF(self.rect()).adjusted(12.0, 12.0, -12.0, -12.0)
@@ -257,6 +372,8 @@ class DigitalTwinWidget(QWidget):
                 else "inactief"
             )
             status_lines.append(f"{plc_text} | tabelkalibratie: {calibration}")
+        if self._manual_control_enabled:
+            status_lines.append("Muisbesturing actief: sleep de mallet")
 
         painter.save()
         painter.setFont(QFont(self.font().family(), 8))
@@ -266,7 +383,7 @@ class DigitalTwinWidget(QWidget):
                 field.left() + 8.0,
                 field.top() + 7.0,
                 field.width() - 16.0,
-                32.0,
+                44.0,
             ),
             Qt.AlignLeft | Qt.AlignTop,
             "\n".join(status_lines),
@@ -285,7 +402,7 @@ class DigitalTwinWidget(QWidget):
         painter.drawLine(QPointF(field.right() - goal_width, goal_y + goal_height), QPointF(field.right(), goal_y + goal_height))
 
         puck_x, puck_y, puck_vx, puck_vy = map(float, self._observation[:4])
-        puck_center = self._field_point(field, puck_x, puck_y)
+        puck_center = self._puck_point(field, puck_x, puck_y)
         radius = max(4.0, min(field.width(), field.height()) * 0.035)
 
         if self._sim_bridge is not None:
@@ -293,17 +410,16 @@ class DigitalTwinWidget(QWidget):
             if len(trajectory) > 1:
                 trajectory_line = QPolygonF()
                 for point_x, point_y in trajectory:
-                    trajectory_line.append(self._field_point(field, point_x, point_y))
+                    trajectory_line.append(self._puck_point(field, point_x, point_y))
                 painter.setBrush(Qt.NoBrush)
                 painter.setPen(
                     QPen(QColor("#ffcf33"), 2.5, Qt.DashLine, Qt.RoundCap, Qt.RoundJoin)
                 )
                 painter.drawPolyline(trajectory_line)
 
-                robot_goal_x = -1.0 if float(self._observation[6]) <= 0.0 else 1.0
                 final_x, final_y = trajectory[-1]
-                if abs(final_x - robot_goal_x) <= 1e-6:
-                    catch_point = self._field_point(field, final_x, final_y)
+                if abs(final_y + 1.0) <= 1e-6:
+                    catch_point = self._puck_point(field, final_x, final_y)
                     self._draw_goal_marker(painter, catch_point)
 
         if self._sim_bridge is not None:
@@ -328,7 +444,7 @@ class DigitalTwinWidget(QWidget):
                     style=Qt.DashLine,
                 )
 
-        velocity_end = self._field_point(
+        velocity_end = self._puck_point(
             field,
             puck_x + puck_vx * 3.0,
             puck_y + puck_vy * 3.0,
@@ -358,6 +474,14 @@ class DigitalTwinWidget(QWidget):
 
         robot_center = self._robot_point(field)
         robot_radius = self._robot_marker_radius(field)
+        if self._manual_target_point is not None:
+            painter.setPen(QPen(QColor("#f4b942"), 2.0, Qt.DashLine))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawEllipse(
+                self._manual_target_point,
+                robot_radius * 0.8,
+                robot_radius * 0.8,
+            )
         painter.setPen(QPen(QColor("#56cfe1"), 2.0))
         painter.setBrush(QColor(25, 91, 101, 180))
         painter.drawEllipse(robot_center, robot_radius, robot_radius)

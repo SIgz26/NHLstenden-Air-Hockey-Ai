@@ -19,6 +19,7 @@ from core.opcua_worker import (
     STATE_TEXT_NODE,
     TRACKING_NODE,
     VISION_SEQ_NODE,
+    WRITE_INTERVAL_S,
     OpcUaWorker,
     limit_velocity,
 )
@@ -43,6 +44,8 @@ class _Node:
 class _Client:
     def __init__(self, worker: OpcUaWorker) -> None:
         self.pose_read_count = 0
+        self.write_batches = []
+        self.read_batches = []
 
         def stop_after_second_pose_read() -> None:
             self.pose_read_count += 1
@@ -72,6 +75,15 @@ class _Client:
             return self.nodes["seq"]
         return self.nodes[node_id]
 
+    async def write_values(self, nodes, values):
+        self.write_batches.append((nodes, values))
+        for node, value in zip(nodes, values, strict=True):
+            node.writes.append(ua.DataValue(value))
+
+    async def read_values(self, nodes):
+        self.read_batches.append(nodes)
+        return [await node.read_value() for node in nodes]
+
 
 def test_gvl_node_ids_match_codesys_structure() -> None:
     assert VISION_SEQ_NODE == (
@@ -90,10 +102,33 @@ def test_gvl_node_ids_match_codesys_structure() -> None:
     assert STATE_TEXT_NODE.endswith("GVL_Machine.sStateText")
 
 
-def test_limit_velocity_caps_vector_norm() -> None:
-    vx, vy = limit_velocity(600.0, 800.0)
+def test_limit_velocity_allows_forward_limit() -> None:
+    vx, vy = limit_velocity(0.0, -1200.0)
 
-    assert (vx, vy) == pytest.approx((300.0, 400.0))
+    assert (vx, vy) == pytest.approx((0.0, -1000.0))
+
+
+@pytest.mark.parametrize(
+    ("requested", "expected"),
+    [
+        ((1200.0, 0.0), (850.0, 0.0)),
+        ((0.0, 1200.0), (0.0, 850.0)),
+    ],
+)
+def test_limit_velocity_caps_lateral_and_reverse_axes(requested, expected) -> None:
+    assert limit_velocity(*requested) == pytest.approx(expected)
+
+
+def test_limit_velocity_respects_motor_axis_limit() -> None:
+    vx, vy = limit_velocity(850.0, -850.0)
+
+    assert max(abs(vx - vy), abs(vx + vy)) == pytest.approx(1000.0)
+    assert vx > 0.0
+    assert vy < 0.0
+
+
+def test_opcua_write_interval_is_100_hz() -> None:
+    assert WRITE_INTERVAL_S == pytest.approx(1.0 / 100.0)
 
 
 def test_opcua_write_loop_writes_float_setpoints_and_sequence() -> None:
@@ -130,3 +165,7 @@ def test_opcua_write_loop_writes_float_setpoints_and_sequence() -> None:
     )
     assert statuses == [(True, False, False, "Ready")] * 2
     assert validities == [True, True]
+    assert len(client.write_batches) == 3
+    assert len(client.read_batches) == 2
+    assert worker.roundtrip_ms_avg >= 0.0
+    assert worker.loop_hz > 0.0

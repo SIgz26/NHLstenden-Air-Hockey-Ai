@@ -12,6 +12,7 @@ from PyQt5.QtCore import QThread, pyqtSignal
 from ai.opponents.attacker import AttackerOpponent, ComplexOpponent
 from ai.opponents.base_opponent import BaseOpponent
 from ai.opponents.defender import DefenderOpponent
+from ai.opponents.striker_defender import StrikerDefenderOpponent
 from core.opcua_worker import limit_velocity
 from core.sim_bridge import SimBridge
 
@@ -21,6 +22,7 @@ OPPONENTS: dict[str, type[BaseOpponent]] = {
     "Complex Opponent": ComplexOpponent,
     "Attacker": AttackerOpponent,
     "Defender": DefenderOpponent,
+    "Striker Defender": StrikerDefenderOpponent,
 }
 
 
@@ -35,7 +37,7 @@ class ScriptedOpponentWorker(QThread):
         sim_bridge: SimBridge,
         opponent_name: str,
         action_sink: ActionSink | None = None,
-        frequency_hz: float = 50.0,
+        frequency_hz: float = 100.0,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -44,7 +46,16 @@ class ScriptedOpponentWorker(QThread):
         if frequency_hz <= 0.0:
             raise ValueError("frequency_hz must be greater than zero")
         self.sim_bridge = sim_bridge
-        self.opponent: BaseOpponent = OPPONENTS[opponent_name]()
+        if opponent_name == "Complex Opponent":
+            self.opponent: BaseOpponent = ComplexOpponent(
+                max_speed=1.0,
+                kp_scale=0.60,
+                min_x_ratio=0.25,
+                strike_px_min=0.28,
+                strike_vx_threshold=-0.25,
+            )
+        else:
+            self.opponent = OPPONENTS[opponent_name]()
         self.opponent_name = opponent_name
         self._action_sink = action_sink
         self._period_ns = int(1_000_000_000 / frequency_hz)

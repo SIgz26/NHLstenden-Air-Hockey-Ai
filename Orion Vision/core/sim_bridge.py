@@ -8,6 +8,7 @@ with :meth:`get_observation_vector` or ``bridge.observations.get_nowait()``.
 
 from __future__ import annotations
 
+from collections import deque
 from queue import Empty, Full, Queue
 import time
 from typing import Any, Mapping
@@ -37,6 +38,8 @@ class SimBridge:
     PLC_Y_BOUNDS_MM = (53.7, 789.5)
     PHYSICAL_TABLE_LENGTH_MM = 1940.0
     PHYSICAL_TABLE_WIDTH_MM = 1020.0
+    PLC_X_CENTER_MM = sum(PLC_X_BOUNDS_MM) / 2.0
+    MAX_TRIM_MM = 35.0
 
     def __init__(
         self,
@@ -77,6 +80,13 @@ class SimBridge:
         self._puck_detected = False
         self._last_puck_update: float | None = None
         self._plc_robot_pose_mm: tuple[float, float] | None = None
+        self._plc_pose_samples: deque[tuple[float, float, float]] = deque(maxlen=32)
+        self._plc_robot_speed_mm_s: float | None = None
+        self._calibration_offset_mm = (0.0, 0.0)
+        self.robot_trim_x_mm = 0.0
+        self.robot_trim_y_mm = 0.0
+        self.puck_trim_x_mm = 0.0
+        self.puck_trim_y_mm = 0.0
 
     @staticmethod
     def _validate_bounds(name: str, bounds: tuple[float, float]) -> None:
@@ -115,19 +125,75 @@ class SimBridge:
             self._observation = self._calculate_observation()
             self._publish_latest(self._observation)
 
-    def configure_physical_table_bounds(self) -> None:
-        """Map calibrated camera corners to the PLC's physical millimeter axes.
+    def set_robot_trim_mm(self, x_mm: float, y_mm: float) -> None:
+        """Set bounded table-to-PLC robot alignment trims in millimeters."""
+        self.robot_trim_x_mm, self.robot_trim_y_mm = self._validated_trim_pair(
+            x_mm, y_mm, "robot"
+        )
+        self._refresh_observation()
 
-        Image left/right maps to PLC X (table width). Image top/bottom maps to
-        PLC Y (table depth); with ``invert_y=True``, the image top is the
-        minimum PLC Y edge.
+    def set_puck_trim_mm(self, x_mm: float, y_mm: float) -> None:
+        """Set bounded puck-position trims in millimeters."""
+        self.puck_trim_x_mm, self.puck_trim_y_mm = self._validated_trim_pair(
+            x_mm, y_mm, "puck"
+        )
+        self._refresh_observation()
+
+    @classmethod
+    def _validated_trim_pair(
+        cls, x_mm: float, y_mm: float, name: str
+    ) -> tuple[float, float]:
+        values = np.asarray([x_mm, y_mm], dtype=np.float64)
+        if not np.isfinite(values).all():
+            raise ValueError(f"{name} trims must be finite")
+        return tuple(
+            float(np.clip(value, -cls.MAX_TRIM_MM, cls.MAX_TRIM_MM))
+            for value in values
+        )
+
+    def robot_position_mm(self) -> tuple[float, float] | None:
+        """Return the PLC robot pose in the trimmed table coordinate frame."""
+        if self._plc_robot_pose_mm is None:
+            return None
+        plc_x_mm, plc_y_mm = self._plc_robot_pose_mm
+        return (
+            plc_x_mm + 46.35 - self.robot_trim_x_mm,
+            plc_y_mm - 53.7 - self.robot_trim_y_mm,
+        )
+
+    def physical_target_to_plc_mm(
+        self, table_x_mm: float, table_y_mm: float
+    ) -> tuple[float, float]:
+        """Convert a table-mm target into PLC-mm setpoint coordinates."""
+        target = np.asarray([table_x_mm, table_y_mm], dtype=np.float64)
+        if not np.isfinite(target).all():
+            raise ValueError("physical target coordinates must be finite")
+        return (
+            float(target[0] - 46.35 + self.robot_trim_x_mm),
+            float(target[1] + 53.7 + self.robot_trim_y_mm),
+        )
+
+    def _refresh_observation(self) -> None:
+        if self._raw_puck is not None:
+            self._observation = self._calculate_observation()
+            self._publish_latest(self._observation)
+
+    def configure_physical_table_bounds(self) -> None:
+        """Map calibrated camera corners to full-table physical millimeters.
+
+        The table center is the origin; image left/right spans the full table
+        width, and image top/bottom spans its full goal-to-goal length. PLC
+        robot bounds remain separate and are only used to normalize its pose.
         """
         if self._table_corners is None:
             raise RuntimeError("Calibrate the four table corners before physical control")
-        x_min, x_max = self.PLC_X_BOUNDS_MM
-        y_min, y_max = self.PLC_Y_BOUNDS_MM
+        x_half_width = self.PHYSICAL_TABLE_WIDTH_MM / 2.0
+        y_half_length = self.PHYSICAL_TABLE_LENGTH_MM / 2.0
+        x_min, x_max = -x_half_width, x_half_width
+        y_min, y_max = -y_half_length, y_half_length
         self.set_table_bounds(x_min, y_min, x_max, y_max)
         self._physical_table_calibrated = True
+        self._calibration_offset_mm = (0.0, 0.0)
         if self._raw_puck is not None:
             self._observation = self._calculate_observation()
             self._publish_latest(self._observation)
@@ -151,17 +217,96 @@ class SimBridge:
         pose = float(x_mm), float(y_mm)
         if not np.isfinite(pose).all():
             raise ValueError("PLC robot pose must contain finite coordinates")
+        now = time.monotonic()
         self._plc_robot_pose_mm = pose
+        self._plc_pose_samples.append((now, pose[0], pose[1]))
+        while (
+            len(self._plc_pose_samples) > 2
+            and self._plc_pose_samples[1][0] <= now - 0.1
+        ):
+            self._plc_pose_samples.popleft()
+        first_sample = self._plc_pose_samples[0]
+        elapsed = now - first_sample[0]
+        self._plc_robot_speed_mm_s = (
+            float(np.hypot(pose[0] - first_sample[1], pose[1] - first_sample[2]) / elapsed)
+            if elapsed >= 0.05
+            else None
+        )
         if self._raw_puck is not None:
             self._observation = self._calculate_observation()
             self._publish_latest(self._observation)
 
+    @property
+    def plc_robot_position_mm(self) -> tuple[float, float] | None:
+        """Return the latest untrimmed PLC encoder pose in millimeters."""
+        return self._plc_robot_pose_mm
+
     def clear_robot_position_mm(self) -> None:
         """Stop using a PLC pose after the PLC marks it invalid."""
         self._plc_robot_pose_mm = None
+        self._plc_pose_samples.clear()
+        self._plc_robot_speed_mm_s = None
         if self._raw_puck is not None:
             self._observation = self._calculate_observation()
             self._publish_latest(self._observation)
+
+    @property
+    def plc_robot_speed_mm_s(self) -> float | None:
+        """Return the recent PLC pose speed, or ``None`` until measurable."""
+        return self._plc_robot_speed_mm_s
+
+    @property
+    def calibration_offset_mm(self) -> tuple[float, float]:
+        """Return the active camera-to-PLC bias correction in table millimeters."""
+        return self._calibration_offset_mm
+
+    def update_mallet_bias(
+        self,
+        marker_u: float,
+        marker_v: float,
+        *,
+        max_speed_mm_s: float = 30.0,
+    ) -> bool:
+        """Update the slow camera-to-PLC bias from the calibrated robot marker."""
+        marker = float(marker_u), float(marker_v)
+        if not np.isfinite(marker).all():
+            raise ValueError("marker center must contain finite pixel coordinates")
+        if max_speed_mm_s <= 0.0:
+            raise ValueError("max_speed_mm_s must be greater than zero")
+        if (
+            not self._physical_table_calibrated
+            or self._plc_robot_pose_mm is None
+            or self._plc_robot_speed_mm_s is None
+            or self._plc_robot_speed_mm_s >= max_speed_mm_s
+        ):
+            return False
+
+        camera_x_mm, camera_y_mm = self._transform_point(*marker)
+        plc_x_mm, plc_y_mm = self._plc_robot_pose_mm
+        measured_offset = (
+            camera_x_mm - (plc_x_mm + 46.35),
+            camera_y_mm - (plc_y_mm - 53.7),
+        )
+        alpha = 0.05
+        filtered = tuple(
+            float(np.clip(current + alpha * (measured - current), -15.0, 15.0))
+            for current, measured in zip(self._calibration_offset_mm, measured_offset)
+        )
+        self._calibration_offset_mm = filtered
+        if self._raw_puck is not None:
+            self._observation = self._calculate_observation()
+            self._publish_latest(self._observation)
+        return True
+
+    def _correct_table_point(
+        self, point: tuple[float, float]
+    ) -> tuple[float, float]:
+        if not self._physical_table_calibrated:
+            return point
+        return (
+            point[0] - self._calibration_offset_mm[0] + self.puck_trim_x_mm,
+            point[1] - self._calibration_offset_mm[1] + self.puck_trim_y_mm,
+        )
 
     def get_opponent_physical_state(
         self,
@@ -181,34 +326,24 @@ class SimBridge:
             return None
 
         puck_x, puck_y, puck_vx, puck_vy, frame_rate = self._raw_puck
-        puck_point = self._transform_point(puck_x, puck_y)
+        puck_point = self._correct_table_point(
+            self._transform_point(puck_x, puck_y)
+        )
         velocity_endpoint = self._transform_point(
             puck_x + puck_vx, puck_y + puck_vy
         )
+        velocity_endpoint = self._correct_table_point(velocity_endpoint)
         rectified_vx = velocity_endpoint[0] - puck_point[0]
         rectified_vy = velocity_endpoint[1] - puck_point[1]
 
-        puck_x_norm = self._normalize(puck_point[0], self.x_bounds)
-        puck_y_norm = self._normalize(puck_point[1], self.y_bounds)
-        if self.invert_y:
-            puck_y_norm = -puck_y_norm
-
-        field_length_m = self.PHYSICAL_TABLE_LENGTH_MM / 1000.0
-        field_width_m = self.PHYSICAL_TABLE_WIDTH_MM / 1000.0
         puck_pos_m = np.asarray(
-            [-puck_y_norm * field_length_m / 2.0, puck_x_norm * field_width_m / 2.0],
+            [puck_point[1] / 1000.0, puck_point[0] / 1000.0],
             dtype=np.float64,
         )
         puck_vel_mps = np.asarray(
             [
-                rectified_vy
-                * frame_rate
-                * field_length_m
-                / (self.y_bounds[1] - self.y_bounds[0]),
-                rectified_vx
-                * frame_rate
-                * field_width_m
-                / (self.x_bounds[1] - self.x_bounds[0]),
+                rectified_vy * frame_rate / 1000.0,
+                rectified_vx * frame_rate / 1000.0,
             ],
             dtype=np.float64,
         )
@@ -218,13 +353,12 @@ class SimBridge:
         robot_x_mm, robot_y_mm = self._plc_robot_pose_mm
         robot_x_mm = float(np.clip(robot_x_mm, plc_x_min, plc_x_max))
         robot_y_mm = float(np.clip(robot_y_mm, plc_y_min, plc_y_max))
+        robot_table_x_mm = robot_x_mm + 46.35 - self.robot_trim_x_mm
+        robot_table_y_mm = robot_y_mm - 53.7 - self.robot_trim_y_mm
         robot_pos_m = np.asarray(
             [
-                (robot_y_mm - plc_y_min)
-                / (plc_y_max - plc_y_min)
-                * field_length_m
-                / 2.0,
-                robot_x_mm / 1000.0,
+                robot_table_y_mm / 1000.0,
+                robot_table_x_mm / 1000.0,
             ],
             dtype=np.float64,
         )
@@ -293,6 +427,7 @@ class SimBridge:
         self._table_corners = tuple(
             (float(point[0]), float(point[1])) for point in source
         )
+        self._calibration_offset_mm = (0.0, 0.0)
         self._rebuild_perspective_matrix()
         if self._raw_puck is not None:
             self._observation = self._calculate_observation()
@@ -318,6 +453,9 @@ class SimBridge:
         self._table_bounds_explicit = False
         self._physical_table_calibrated = False
         self._plc_robot_pose_mm = None
+        self._plc_pose_samples.clear()
+        self._plc_robot_speed_mm_s = None
+        self._calibration_offset_mm = (0.0, 0.0)
         if frame_width is not None and frame_height is not None:
             if frame_width <= 1 or frame_height <= 1:
                 raise ValueError("frame dimensions must both be greater than one pixel")
@@ -435,8 +573,12 @@ class SimBridge:
             return self._observation.copy()
 
         puck_x, puck_y, puck_vx, puck_vy, frame_rate = self._raw_puck
-        puck_rectified = self._transform_point(puck_x, puck_y)
-        velocity_endpoint = self._transform_point(puck_x + puck_vx, puck_y + puck_vy)
+        puck_rectified = self._correct_table_point(
+            self._transform_point(puck_x, puck_y)
+        )
+        velocity_endpoint = self._correct_table_point(
+            self._transform_point(puck_x + puck_vx, puck_y + puck_vy)
+        )
         rectified_vx = velocity_endpoint[0] - puck_rectified[0]
         rectified_vy = velocity_endpoint[1] - puck_rectified[1]
 
@@ -447,8 +589,12 @@ class SimBridge:
         opp_x_norm, opp_y_norm = self._normalize_optional(self._opponent_xy)
         if self._plc_robot_pose_mm is not None and self._physical_table_calibrated:
             robot_x_mm, robot_y_mm = self._plc_robot_pose_mm
-            robot_x_norm = self._normalize(robot_x_mm, self.x_bounds)
-            robot_y_norm = self._normalize(robot_y_mm, self.y_bounds)
+            robot_x_norm = self._normalize(
+                robot_x_mm - self.robot_trim_x_mm, self.PLC_X_BOUNDS_MM
+            )
+            robot_y_norm = self._normalize(
+                robot_y_mm - self.robot_trim_y_mm, self.PLC_Y_BOUNDS_MM
+            )
             if self.invert_y:
                 robot_y_norm = -robot_y_norm
         else:

@@ -77,6 +77,12 @@ def test_worker_runs_approximately_at_100_hz_and_calls_action_sink():
     np.testing.assert_allclose(sent_actions[-1], (250.0, -250.0), atol=1e-7)
 
 
+def test_worker_applies_asymmetric_plc_speed_limits():
+    assert SACAgentWorker._to_plc_velocity(1.0, 0.0) == (0.0, -1000.0)
+    assert SACAgentWorker._to_plc_velocity(-1.0, 0.0) == (0.0, 850.0)
+    assert SACAgentWorker._to_plc_velocity(0.0, 1.0) == (850.0, 0.0)
+
+
 def test_controller_reorders_calibrated_live_axes_for_training_policy():
     bridge = SimBridge()
     bridge.set_table_corners(

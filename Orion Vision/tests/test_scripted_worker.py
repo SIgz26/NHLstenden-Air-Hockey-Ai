@@ -8,6 +8,7 @@ if str(PROJECT_ROOT) not in sys.path:
 import numpy as np
 
 from ai.opponents.base_opponent import BaseOpponent
+from ai.opponents.striker_defender import StrikerDefenderOpponent
 from ai.scripted_worker import OPPONENTS, ScriptedOpponentWorker
 from core.sim_bridge import SimBridge
 
@@ -77,24 +78,31 @@ def test_scripted_worker_converts_physical_axes_and_limits_speed(monkeypatch) ->
     puck_pos, puck_vel, mallet_pos, field_length, field_width, mallet_radius = received
     np.testing.assert_allclose(puck_pos, [0.0, 0.0], atol=1e-6)
     np.testing.assert_allclose(puck_vel, [0.0, 0.0], atol=1e-6)
-    np.testing.assert_allclose(mallet_pos, [0.485, -0.04635], atol=1e-6)
+    np.testing.assert_allclose(mallet_pos, [0.3679, 0.0], atol=1e-6)
     assert field_length == 1.94
     assert field_width == 1.02
     assert mallet_radius == 0.048
+    assert worker._period_ns == 10_000_000
 
 
 def test_scripted_worker_maps_our_goal_to_positive_half_length(monkeypatch) -> None:
     monkeypatch.setitem(OPPONENTS, "Recording", _RecordingOpponent)
     _RecordingOpponent.received = None
     bridge = _calibrated_bridge()
-    bridge.set_robot_position_mm(0.0, 789.5)
+    bridge.set_robot_position_mm(-46.35, 789.5)
     worker = ScriptedOpponentWorker(bridge, "Recording")
 
     worker._calculate_action()
 
     received = _RecordingOpponent.received
     assert received is not None
-    np.testing.assert_allclose(received[2], [0.97, 0.0], atol=1e-6)
+    np.testing.assert_allclose(received[2], [0.7358, 0.0], atol=1e-6)
+
+    bridge.set_robot_position_mm(-46.35, 53.7)
+    worker._calculate_action()
+    received = _RecordingOpponent.received
+    assert received is not None
+    np.testing.assert_allclose(received[2], [0.0, 0.0], atol=1e-6)
 
 
 def test_scripted_worker_maps_forward_velocity_to_negative_plc_y(monkeypatch) -> None:
@@ -108,19 +116,155 @@ def test_scripted_worker_maps_forward_velocity_to_negative_plc_y(monkeypatch) ->
     assert worker._calculate_action() == (300.0, -200.0)
 
 
-def test_scripted_worker_clamps_converted_velocity_vector_to_500_mm_s(monkeypatch) -> None:
+def test_scripted_worker_allows_forward_velocity_to_1000_mm_s(monkeypatch) -> None:
     class FastOpponent(_RecordingOpponent):
         def get_action(self, **kwargs) -> np.ndarray:
-            return np.asarray([-3.5, 2.5], dtype=np.float64)
+            return np.asarray([-2.5, 0.0], dtype=np.float64)
 
     monkeypatch.setitem(OPPONENTS, "Fast", FastOpponent)
     worker = ScriptedOpponentWorker(_calibrated_bridge(), "Fast")
 
     vx_mm_s, vy_mm_s = worker._calculate_action()
 
-    assert vx_mm_s > 0.0
-    assert vy_mm_s < 0.0
-    assert np.isclose(np.hypot(vx_mm_s, vy_mm_s), 500.0)
+    assert vx_mm_s == 0.0
+    assert np.isclose(vy_mm_s, -1000.0)
+
+
+def test_scripted_worker_respects_motor_axis_limit(monkeypatch) -> None:
+    class DiagonalOpponent(_RecordingOpponent):
+        def get_action(self, **kwargs) -> np.ndarray:
+            return np.asarray([1.0, 1.0], dtype=np.float64)
+
+    monkeypatch.setitem(OPPONENTS, "Diagonal", DiagonalOpponent)
+    worker = ScriptedOpponentWorker(_calibrated_bridge(), "Diagonal")
+
+    vx_mm_s, vy_mm_s = worker._calculate_action()
+
+    assert (vx_mm_s, vy_mm_s) == (500.0, 500.0)
+    assert max(abs(vx_mm_s - vy_mm_s), abs(vx_mm_s + vy_mm_s)) == 1000.0
+
+
+def _striker_worker_with_state(puck_pos, puck_vel, mallet_pos):
+    bridge = _calibrated_bridge()
+    bridge.get_opponent_physical_state = lambda: (
+        np.asarray(puck_pos, dtype=np.float64),
+        np.asarray(puck_vel, dtype=np.float64),
+        np.asarray(mallet_pos, dtype=np.float64),
+    )
+    return ScriptedOpponentWorker(bridge, "Striker Defender")
+
+
+def test_striker_defender_holds_defend_line_and_returns_to_center():
+    worker = _striker_worker_with_state(
+        puck_pos=(-0.3, 0.25),
+        puck_vel=(0.0, 0.0),
+        mallet_pos=(0.64, 0.2),
+    )
+
+    vx_mm_s, vy_mm_s = worker._calculate_action()
+
+    assert worker.opponent.mode == "DEFEND"
+    assert vx_mm_s < 0.0
+    assert vy_mm_s == 0.0
+
+
+def test_striker_defender_predicts_defensive_intercept_with_one_wall_bounce():
+    worker = _striker_worker_with_state(
+        puck_pos=(0.2, 0.35),
+        puck_vel=(1.0, 2.5),
+        mallet_pos=(0.64, 0.0),
+    )
+
+    vx_mm_s, vy_mm_s = worker._calculate_action()
+
+    assert worker.opponent.mode == "DEFEND"
+    assert vx_mm_s == -850.0
+    assert vy_mm_s == 0.0
+
+
+def test_striker_defender_aligns_behind_puck_before_striking():
+    worker = _striker_worker_with_state(
+        puck_pos=(0.3, 0.2),
+        puck_vel=(0.0, 0.0),
+        mallet_pos=(0.1, 0.2),
+    )
+
+    vx_mm_s, vy_mm_s = worker._calculate_action()
+
+    assert worker.opponent.mode == "ALIGN"
+    assert vy_mm_s > 0.0
+    assert vx_mm_s != 0.0
+
+
+def test_striker_defender_strikes_forward_at_one_meter_per_second():
+    worker = _striker_worker_with_state(
+        puck_pos=(0.3, 0.0),
+        puck_vel=(0.0, 0.0),
+        mallet_pos=(0.41, 0.0),
+    )
+
+    vx_mm_s, vy_mm_s = worker._calculate_action()
+
+    assert worker.opponent.mode == "STRIKE"
+    assert vx_mm_s == 0.0
+    assert vy_mm_s == -1000.0
+
+
+def test_striker_defender_hysteresis_avoids_mode_chatter():
+    opponent = StrikerDefenderOpponent()
+    args = dict(
+        puck_vel=np.asarray([0.0, 0.0]),
+        opponent_pos=np.asarray([0.0, 0.0]),
+        field_length=1.94,
+        field_width=1.02,
+        mallet_radius=0.048,
+    )
+
+    opponent.get_action(puck_pos=np.asarray([0.3, 0.0]), **args)
+    assert opponent.mode == "ALIGN"
+    opponent.get_action(puck_pos=np.asarray([0.02, 0.0]), **args)
+    assert opponent.mode == "ALIGN"
+    opponent.get_action(puck_pos=np.asarray([-0.06, 0.0]), **args)
+    assert opponent.mode == "DEFEND"
+
+
+def test_striker_defender_waits_until_puck_leaves_after_completed_strike():
+    opponent = StrikerDefenderOpponent()
+    common = dict(
+        opponent_pos=np.asarray([0.41, 0.0]),
+        field_length=1.94,
+        field_width=1.02,
+        mallet_radius=0.048,
+    )
+
+    strike = opponent.get_action(
+        puck_pos=np.asarray([0.3, 0.0]),
+        puck_vel=np.asarray([0.0, 0.0]),
+        **common,
+    )
+    np.testing.assert_allclose(strike, [-1.0, 0.0])
+    assert opponent.mode == "STRIKE"
+
+    opponent.get_action(
+        puck_pos=np.asarray([0.3, 0.0]),
+        puck_vel=np.asarray([-0.4, 0.0]),
+        **common,
+    )
+    assert opponent.mode == "DEFEND"
+    assert opponent._attack_blocked
+
+    opponent.get_action(
+        puck_pos=np.asarray([0.3, 0.0]),
+        puck_vel=np.asarray([0.0, 0.0]),
+        **common,
+    )
+    assert opponent.mode == "DEFEND"
+    opponent.get_action(
+        puck_pos=np.asarray([-0.06, 0.0]),
+        puck_vel=np.asarray([0.0, 0.0]),
+        **common,
+    )
+    assert not opponent._attack_blocked
 
 
 def test_opponent_physical_state_uses_full_table_and_plc_robot_coordinates() -> None:
@@ -134,7 +278,7 @@ def test_opponent_physical_state_uses_full_table_and_plc_robot_coordinates() -> 
     np.testing.assert_array_equal(bridge.get_observation_vector(), observation_before)
     np.testing.assert_allclose(puck_pos, [0.0, 0.0], atol=1e-6)
     np.testing.assert_allclose(puck_vel, [0.0, 0.0], atol=1e-6)
-    np.testing.assert_allclose(robot_pos, [0.485, -0.04635], atol=1e-6)
+    np.testing.assert_allclose(robot_pos, [0.3679, 0.0], atol=1e-6)
 
 
 def test_opponent_physical_state_maps_full_table_and_forward_velocity() -> None:
@@ -207,16 +351,16 @@ def test_scripted_worker_outputs_zero_for_stale_puck_detection(monkeypatch) -> N
     assert worker._calculate_action() == (0.0, 0.0)
 
 
-def test_physical_calibration_maps_width_and_depth_to_plc_mm() -> None:
+def test_physical_calibration_maps_full_table_and_normalizes_plc_robot_separately() -> None:
     bridge = _calibrated_bridge()
     bridge.set_robot_position_mm(-46.35, 421.6)
     observation = bridge.get_observation_vector()
 
     assert bridge.physical_table_calibrated
-    assert bridge.table_x_min == -463.2
-    assert bridge.table_x_max == 370.5
-    assert bridge.table_y_min == 53.7
-    assert bridge.table_y_max == 789.5
+    assert bridge.table_x_min == -510.0
+    assert bridge.table_x_max == 510.0
+    assert bridge.table_y_min == -970.0
+    assert bridge.table_y_max == 970.0
     np.testing.assert_allclose(observation[6:8], [0.0, 0.0], atol=1e-6)
 
     top_left = bridge.update_from_engine(

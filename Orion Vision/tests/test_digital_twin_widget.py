@@ -11,8 +11,9 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import numpy as np
-from PyQt5.QtCore import QTimer
+from PyQt5.QtCore import QPoint, Qt, QTimer
 from PyQt5.QtGui import QColor, QImage
+from PyQt5.QtTest import QTest
 from PyQt5.QtWidgets import QApplication
 
 from core.sim_bridge import SimBridge
@@ -44,6 +45,130 @@ def test_scripted_plc_velocity_signs_align_with_twin_action_axes():
     assert vy_endpoint.y() == robot.y()
     assert result_endpoint.x() > robot.x()
     assert result_endpoint.y() < robot.y()
+
+    widget.close()
+    app.processEvents()
+
+
+def test_puck_uses_robot_screen_axes_for_position_and_velocity():
+    app = QApplication.instance() or QApplication([])
+    widget = DigitalTwinWidget()
+    field = widget._field_rect()
+
+    own_goal_and_bottom = widget._puck_point(field, -1.0, -1.0)
+    opponent_goal_and_top = widget._puck_point(field, 1.0, 1.0)
+    assert own_goal_and_bottom.x() == field.left()
+    assert own_goal_and_bottom.y() == field.bottom()
+    assert opponent_goal_and_top.x() == field.right()
+    assert opponent_goal_and_top.y() == field.top()
+
+    puck_x, puck_y = -0.5, -0.5
+    start = widget._puck_point(field, puck_x, puck_y)
+    width_axis_end = widget._puck_point(field, puck_x + 0.5, puck_y)
+    length_axis_end = widget._puck_point(field, puck_x, puck_y + 0.5)
+    assert width_axis_end.x() == start.x()
+    assert width_axis_end.y() < start.y()
+    assert length_axis_end.x() > start.x()
+    assert length_axis_end.y() == start.y()
+
+    velocity_end = widget._puck_point(
+        field,
+        puck_x + 0.25 * 3.0,
+        puck_y + 0.5 * 3.0,
+    )
+    assert velocity_end.x() > start.x()
+    assert velocity_end.y() < start.y()
+
+    widget.close()
+    app.processEvents()
+
+
+def test_mouse_drag_emits_clamped_table_position_only_when_enabled():
+    app = QApplication.instance() or QApplication([])
+    bridge = SimBridge(invert_y=True)
+    bridge.set_table_corners(
+        top_left=(0.0, 0.0),
+        top_right=(1020.0, 0.0),
+        bottom_right=(1020.0, 1940.0),
+        bottom_left=(0.0, 1940.0),
+    )
+    bridge.configure_physical_table_bounds()
+    bridge.update(510.0, 970.0, 0.0, 0.0, frame_rate=30.0)
+    bridge.set_robot_position_mm(bridge.PLC_X_CENTER_MM, 421.6)
+
+    widget = DigitalTwinWidget(bridge)
+    widget.resize(600, 400)
+    widget.show()
+    app.processEvents()
+    field = widget._field_rect()
+    robot = widget._robot_point(field)
+    targets = []
+    widget.manual_target_requested.connect(
+        lambda x_mm, y_mm: targets.append((x_mm, y_mm))
+    )
+
+    press = QPoint(round(robot.x()), round(robot.y()))
+    move = QPoint(round(field.center().x() - 15), round(field.top() + 30))
+    QTest.mousePress(widget, Qt.LeftButton, Qt.NoModifier, press)
+    QTest.mouseRelease(widget, Qt.LeftButton, Qt.NoModifier, press)
+    assert not targets
+
+    widget.set_manual_control_enabled(True)
+    QTest.mousePress(widget, Qt.LeftButton, Qt.NoModifier, press)
+    QTest.mouseMove(widget, move)
+    QTest.mouseRelease(widget, Qt.LeftButton, Qt.NoModifier, move)
+
+    assert targets
+    expected = widget._table_target_from_point(move, field)
+    assert expected is not None
+    np.testing.assert_allclose(targets[-1], expected, atol=1e-6)
+    assert targets[-1][1] > 0.0
+    half_x_range = (
+        bridge.PLC_X_BOUNDS_MM[1] - bridge.PLC_X_BOUNDS_MM[0]
+    ) / 2.0
+    assert -half_x_range <= targets[-1][0] <= half_x_range
+
+    widget.close()
+    app.processEvents()
+
+
+def test_mouse_target_maps_to_plc_robot_workspace():
+    app = QApplication.instance() or QApplication([])
+    bridge = SimBridge()
+    bridge.set_table_corners(
+        top_left=(0.0, 0.0),
+        top_right=(1020.0, 0.0),
+        bottom_right=(1020.0, 1940.0),
+        bottom_left=(0.0, 1940.0),
+    )
+    bridge.configure_physical_table_bounds()
+    widget = DigitalTwinWidget(bridge)
+    widget.resize(600, 400)
+    field = widget._field_rect()
+
+    for point in (
+        QPoint(round(field.left()), round(field.top())),
+        QPoint(round(field.left()), round(field.bottom())),
+        QPoint(round(field.center().x()), round(field.center().y())),
+    ):
+        table_target = widget._table_target_from_point(point, field)
+        assert table_target is not None
+        plc_target = bridge.physical_target_to_plc_mm(*table_target)
+        assert bridge.PLC_X_BOUNDS_MM[0] - 1e-6 <= plc_target[0] <= bridge.PLC_X_BOUNDS_MM[1] + 1e-6
+        assert bridge.PLC_Y_BOUNDS_MM[0] - 1e-6 <= plc_target[1] <= bridge.PLC_Y_BOUNDS_MM[1] + 1e-6
+
+    top_target = widget._table_target_from_point(
+        QPoint(round(field.center().x() - 10), round(field.top())),
+        field,
+    )
+    bottom_target = widget._table_target_from_point(
+        QPoint(round(field.center().x() - 10), round(field.bottom())),
+        field,
+    )
+    assert top_target is not None
+    assert bottom_target is not None
+    assert bridge.physical_target_to_plc_mm(*top_target)[0] > 0.0
+    assert bridge.physical_target_to_plc_mm(*bottom_target)[0] < 0.0
 
     widget.close()
     app.processEvents()
@@ -220,9 +345,14 @@ def test_predicted_puck_path_and_robot_goal_intercept_render():
     widget.resize(480, 280)
     widget.update_sac_action(0.2, 0.1)
 
+    field = widget._field_rect()
     trajectory = bridge.predict_puck_trajectory()
     assert trajectory[-1][1] == -1.0
     assert trajectory[-1][0] == -0.5
+    trajectory_start = widget._puck_point(field, *trajectory[0])
+    trajectory_end = widget._puck_point(field, *trajectory[-1])
+    assert trajectory_end.x() < trajectory_start.x()
+    assert trajectory_end.y() == trajectory_start.y()
 
     image = QImage(widget.size(), QImage.Format_ARGB32)
     image.fill(QColor("#000000"))
