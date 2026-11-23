@@ -601,11 +601,14 @@ class OrionLiveDashboard(QWidget):
 
     def _load_sac_model(self) -> None:
         """Select and load a Stable-Baselines3 SAC archive."""
+        options = QFileDialog.Options()
+        options |= QFileDialog.DontUseNativeDialog
         model_path, _ = QFileDialog.getOpenFileName(
             self,
             "Load SAC model",
             "",
             "Stable-Baselines3 model (*.zip)",
+            options=options,
         )
         if not model_path:
             return
@@ -617,7 +620,9 @@ class OrionLiveDashboard(QWidget):
             self.sac_controller = controller
             self.sac_model_path = model_path
             self.lbl_sac_model.setText(f"Model: {model_path}")
-            self.lbl_sac_status.setText("Model loaded; start live camera to run agent")
+            self.lbl_sac_status.setText(
+                f"{controller.observation_adapter_status}; start live camera to run agent"
+            )
             self.btn_toggle_sac_agent.setEnabled(True)
             if self.combo_controller.currentText() == "SAC Agent":
                 self._start_sac_agent()

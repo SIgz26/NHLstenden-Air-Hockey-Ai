@@ -220,6 +220,18 @@ def test_opponent_velocity_is_estimated_in_normalized_table_units(monkeypatch):
     np.testing.assert_allclose(bridge.get_opponent_velocity(), (2.0, 1.0), atol=1e-6)
 
 
+def test_plc_robot_velocity_reports_signed_axis_motion(monkeypatch):
+    bridge = SimBridge()
+    current_time = [5.0]
+    monkeypatch.setattr("core.sim_bridge.time.monotonic", lambda: current_time[0])
+
+    bridge.set_robot_position_mm(10.0, 20.0)
+    current_time[0] += 0.1
+    bridge.set_robot_position_mm(30.0, 60.0)
+
+    np.testing.assert_allclose(bridge.plc_robot_velocity_mm_s, (200.0, 400.0))
+
+
 def _calibrated_bias_bridge(monkeypatch):
     bridge = SimBridge(invert_y=False)
     bridge.set_table_corners(

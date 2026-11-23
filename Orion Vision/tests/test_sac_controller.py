@@ -1,8 +1,10 @@
 """Tests for live SAC action inference and its 100 Hz worker loop."""
 
+import os
 import subprocess
 import sys
 import time
+from unittest.mock import patch
 from pathlib import Path
 
 import numpy as np
@@ -13,6 +15,9 @@ from core.sim_bridge import SimBridge
 
 
 class DummySACModel:
+    observation_space = type("Space", (), {"shape": (8,)})()
+    action_space = type("Space", (), {"shape": (2,)})()
+
     def __init__(self, action=(0.25, -0.5)):
         self.action = np.asarray(action, dtype=np.float32)
         self.last_observation = None
@@ -35,6 +40,19 @@ def test_controller_reads_live_vector_and_returns_two_actions():
     assert action == (0.25, -0.5)
     assert model.last_observation.shape == (8,)
     assert model.deterministic is True
+
+
+def test_controller_predicts_without_gradients():
+    import torch
+
+    class GradientCheckingModel(DummySACModel):
+        def predict(self, observation, deterministic=True):
+            assert not torch.is_grad_enabled()
+            return super().predict(observation, deterministic)
+
+    controller = LiveSACController(SimBridge(), model=GradientCheckingModel())
+
+    controller.predict_action()
 
 
 def test_worker_runs_approximately_at_100_hz_and_calls_action_sink():
@@ -131,12 +149,56 @@ def test_controller_rejects_wrong_action_dimension():
         raise AssertionError("Expected non-2D policy output to fail validation")
 
 
+def test_controller_rejects_unknown_observation_dimension(tmp_path):
+    class UnknownDimensionModel:
+        observation_space = type("Space", (), {"shape": (10,)})()
+        action_space = type("Space", (), {"shape": (2,)})()
+
+    class FakeSAC:
+        @staticmethod
+        def load(*args, **kwargs):
+            return UnknownDimensionModel()
+
+    model_path = tmp_path / "unknown_dimension.zip"
+    model_path.touch()
+    controller = LiveSACController(SimBridge())
+
+    with (
+        patch("ai.sac_controller._SAC_CLASS", FakeSAC),
+        patch("ai.sac_controller.check_sac_runtime"),
+    ):
+        try:
+            controller.load_model(model_path)
+        except ValueError as exc:
+            assert "supports only (8,) and (12,)" in str(exc)
+        else:
+            raise AssertionError("Expected unknown observation dimension to be rejected")
+
+    assert controller.model is None
+
+
 def test_generated_dummy_model_loads_and_predicts_valid_action(tmp_path):
     project_root = Path(__file__).resolve().parents[1]
     model_path = tmp_path / "dummy_sac_model.zip"
+    trained_model_path = (
+        project_root / "models" / "Sessie06" / "trained_sac_model_stage2.zip"
+    )
     child_script = f"""
+import faulthandler
+faulthandler.enable()
+import PyQt5
+import cv2
+import vmbpy
+from PyQt5.QtWidgets import QApplication, QFileDialog
+
+app = QApplication([])
+dialog = QFileDialog()
+dialog.setOption(QFileDialog.DontUseNativeDialog)
+assert dialog.testOption(QFileDialog.DontUseNativeDialog)
+
 import numpy as np
 from ai.generate_dummy_model import generate_dummy_model
+from ai.agent_worker import SACAgentWorker
 from ai.sac_controller import LiveSACController
 from core.sim_bridge import SimBridge
 
@@ -149,12 +211,62 @@ controller = LiveSACController(bridge)
 controller.load_model(model_path)
 action = controller.predict_action()
 assert model_path.is_file()
+assert controller.model.device.type == "cpu"
 assert len(action) == 2 and np.isfinite(action).all()
 print(f"valid two-dimensional action: {{action}}")
+
+trained_bridge = SimBridge()
+trained_bridge.set_table_corners(
+    top_left=(0.0, 0.0),
+    top_right=(1000.0, 0.0),
+    bottom_right=(1000.0, 800.0),
+    bottom_left=(0.0, 800.0),
+)
+trained_bridge.configure_physical_table_bounds()
+trained_bridge.update(500.0, 524.0, 0.0, 15.0, frame_rate=30.0)
+trained_bridge.set_robot_position_mm(0.0, 250.0)
+live_observation = trained_bridge.get_observation_vector()
+assert live_observation.shape == (8,)
+trained_controller = LiveSACController(trained_bridge)
+trained_controller.load_model({str(trained_model_path)!r})
+assert trained_controller.observation_adapter_status.startswith(
+    "12D SAC model; 8->12 adapter active"
+)
+captured = {{}}
+model_predict = trained_controller.model.predict
+def capture_model_input(observation, deterministic=True):
+    captured["observation"] = np.asarray(observation).copy()
+    return model_predict(observation, deterministic=deterministic)
+trained_controller.model.predict = capture_model_input
+trained_action = trained_controller.predict_action()
+model_observation = captured["observation"]
+assert model_observation.shape == (12,)
+np.testing.assert_allclose(
+    model_observation,
+    [
+        -0.30841026, 0.0, -0.21825, 0.0,
+        0.72, 0.0, -0.20133333, 0.09459183,
+        -0.05353846, -0.04729592, -0.1455, 0.0,
+    ],
+    atol=1e-5,
+)
+assert np.isfinite(trained_action).all()
+assert trained_action[0] < 0.0
+plc_velocity = SACAgentWorker._to_plc_velocity(*trained_action)
+assert plc_velocity[1] > 0.0
+print(
+    "12D model inference OK; incoming puck and mallet both move toward "
+    f"our goal: action={{trained_action}}, PLC velocity={{plc_velocity}}"
+)
 """
+    child_env = os.environ.copy()
+    child_env["PYTHONFAULTHANDLER"] = "1"
+    child_env["QT_QPA_PLATFORM"] = "offscreen"
+    child_env.pop("QT_QPA_PLATFORM_PLUGIN_PATH", None)
     completed = subprocess.run(
         [sys.executable, "-c", child_script],
         cwd=project_root,
+        env=child_env,
         capture_output=True,
         text=True,
         timeout=90,
@@ -163,3 +275,4 @@ print(f"valid two-dimensional action: {{action}}")
 
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert "valid two-dimensional action" in completed.stdout
+    assert "12D model inference OK" in completed.stdout

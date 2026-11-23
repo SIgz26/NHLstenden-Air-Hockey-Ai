@@ -3,18 +3,32 @@
 #door: Timo Zylstra
 #datum: 30-10-2026
 #
-import PyQt5    
 import os
 import sys
 import ctypes
 
 try:
     import torch
+    torch.set_num_threads(1)
     TORCH_IMPORT_ERROR = None
 except Exception as exc:
     torch = None
     TORCH_IMPORT_ERROR = exc
     print(f"PyTorch unavailable; SAC inference disabled: {exc}", file=sys.stderr)
+
+SAC_CLASS = None
+if torch is None:
+    SB3_IMPORT_ERROR = TORCH_IMPORT_ERROR
+else:
+    try:
+        from stable_baselines3 import SAC as SAC_CLASS
+    except Exception as exc:
+        SB3_IMPORT_ERROR = exc
+        print(f"Stable-Baselines3 unavailable; SAC inference disabled: {exc}", file=sys.stderr)
+    else:
+        SB3_IMPORT_ERROR = None
+
+import PyQt5
 
 from ai.sac_controller import check_sac_runtime, preload_sac_runtime
 
@@ -22,6 +36,9 @@ if not preload_sac_runtime(
     torch,
     TORCH_IMPORT_ERROR,
     torch_import_attempted=True,
+    sac_class=SAC_CLASS,
+    sac_import_error=SB3_IMPORT_ERROR,
+    sac_import_attempted=True,
 ):
     try:
         check_sac_runtime()

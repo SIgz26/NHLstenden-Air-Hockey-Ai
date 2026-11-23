@@ -256,6 +256,26 @@ class SimBridge:
         return self._plc_robot_speed_mm_s
 
     @property
+    def plc_robot_velocity_mm_s(self) -> tuple[float, float] | None:
+        """Return signed PLC-axis robot velocity after enough pose samples."""
+        if len(self._plc_pose_samples) < 2:
+            return None
+        first = self._plc_pose_samples[0]
+        last = self._plc_pose_samples[-1]
+        elapsed = last[0] - first[0]
+        if elapsed < 0.05:
+            return None
+        return (
+            (last[1] - first[1]) / elapsed,
+            (last[2] - first[2]) / elapsed,
+        )
+
+    @property
+    def has_opponent_position(self) -> bool:
+        """Whether opponent-marker telemetry has supplied a position."""
+        return self._opponent_xy is not None
+
+    @property
     def calibration_offset_mm(self) -> tuple[float, float]:
         """Return the active camera-to-PLC bias correction in table millimeters."""
         return self._calibration_offset_mm
