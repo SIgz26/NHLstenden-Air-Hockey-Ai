@@ -10,7 +10,9 @@ from pathlib import Path
 import numpy as np
 
 from ai.agent_worker import SACAgentWorker
+from ai.air_hockey_env import AirHockeyGymEnv
 from ai.sac_controller import LiveSACController
+from core.coordinate_contract import action_to_velocity_mps
 from core.sim_bridge import SimBridge
 
 
@@ -92,7 +94,9 @@ def test_worker_runs_approximately_at_100_hz_and_calls_action_sink():
     assert 8 <= worker.completed_steps <= 25
     assert len(sent_actions) == worker.completed_steps
     assert sent_actions
-    np.testing.assert_allclose(sent_actions[-1], (250.0, -250.0), atol=1e-7)
+    np.testing.assert_allclose(
+        sent_actions[-1], (85.0, -100.0), atol=1e-5
+    )
 
 
 def test_worker_applies_asymmetric_plc_speed_limits():
@@ -135,6 +139,68 @@ def test_controller_reorders_calibrated_live_axes_for_training_policy():
         [0.5, -0.5, 0.75, -0.8, -0.5, 0.5],
         atol=1e-6,
     )
+
+
+def test_training_and_live_bridge_share_exact_physical_observation_and_action(monkeypatch):
+    bridge = SimBridge(invert_y=True)
+    bridge.set_table_corners(
+        top_left=(0.0, 0.0),
+        top_right=(1020.0, 0.0),
+        bottom_right=(1020.0, 1940.0),
+        bottom_left=(0.0, 1940.0),
+    )
+    bridge.configure_physical_table_bounds()
+    now = [5.0]
+    monkeypatch.setattr("core.sim_bridge.time.monotonic", lambda: now[0])
+
+    bridge.set_robot_position_mm(93.65, 533.7)
+    now[0] += 0.1
+    bridge.set_robot_position_mm(103.65, 553.7)
+    bridge.update(
+        puck_x=610.0,
+        puck_y=1270.0,
+        puck_vx=1.5,
+        puck_vy=2.0,
+        frame_rate=20.0,
+        opponent_x=700.0,
+        opponent_y=300.0,
+    )
+
+    physical_state = bridge.get_training_physical_state()
+    assert physical_state is not None
+    puck_position, puck_velocity, opponent_position, robot_position, robot_velocity = (
+        physical_state
+    )
+    np.testing.assert_allclose(puck_position, (-0.3, 0.1), atol=1e-6)
+    np.testing.assert_allclose(puck_velocity, (-0.04, 0.03), atol=1e-6)
+    np.testing.assert_allclose(opponent_position, (0.67, 0.19), atol=1e-6)
+    np.testing.assert_allclose(robot_position, (-0.5, 0.15), atol=1e-6)
+    np.testing.assert_allclose(robot_velocity, (-0.2, 0.1), atol=1e-6)
+
+    env = AirHockeyGymEnv(opponent_type="none")
+    env._puck_position[:] = puck_position
+    env._puck_velocity[:] = puck_velocity
+    env._opponent_position[:] = opponent_position
+    env._robot_position[:] = robot_position
+    env._robot_velocity[:] = robot_velocity
+    expected_observation = env._make_observation()
+
+    model = DummySACModel()
+    model.observation_space = type("Space", (), {"shape": (12,)})()
+    controller = LiveSACController(bridge, model=model)
+    live_observation = controller._model_observation(
+        bridge.get_observation_vector()
+    )
+    np.testing.assert_array_equal(live_observation, expected_observation)
+
+    action = np.asarray([0.6, -0.4], dtype=np.float32)
+    training_velocity = action_to_velocity_mps(action)
+    plc_vx_mm_s, plc_vy_mm_s = SACAgentWorker._to_plc_velocity(*action)
+    live_physical_velocity = np.asarray(
+        [-plc_vy_mm_s, plc_vx_mm_s], dtype=np.float64
+    ) / 1000.0
+    np.testing.assert_allclose(live_physical_velocity, training_velocity, atol=1e-7)
+    env.close()
 
 
 def test_controller_rejects_wrong_action_dimension():
@@ -230,7 +296,7 @@ assert live_observation.shape == (8,)
 trained_controller = LiveSACController(trained_bridge)
 trained_controller.load_model({str(trained_model_path)!r})
 assert trained_controller.observation_adapter_status.startswith(
-    "12D SAC model; 8->12 adapter active"
+    "12D SAC model; shared physical-state 8->12 adapter active"
 )
 captured = {{}}
 model_predict = trained_controller.model.predict
@@ -244,9 +310,9 @@ assert model_observation.shape == (12,)
 np.testing.assert_allclose(
     model_observation,
     [
-        -0.30841026, 0.0, -0.21825, 0.0,
-        0.72, 0.0, -0.20133333, 0.09459183,
-        -0.05353846, -0.04729592, -0.1455, 0.0,
+        -0.31, 0.0, -0.21825, 0.0,
+        0.72, 0.0, -0.20237114, 0.09088235,
+        -0.05381444, -0.04544118, -0.181875, 0.0,
     ],
     atol=1e-5,
 )

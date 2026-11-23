@@ -16,6 +16,13 @@ from typing import Any, Mapping
 import numpy as np
 import cv2
 
+from core.coordinate_contract import (
+    FIELD_LENGTH_M as CONTRACT_FIELD_LENGTH_M,
+    FIELD_WIDTH_M as CONTRACT_FIELD_WIDTH_M,
+    PLC_X_BOUNDS_MM as CONTRACT_PLC_X_BOUNDS_MM,
+    PLC_Y_BOUNDS_MM as CONTRACT_PLC_Y_BOUNDS_MM,
+)
+
 
 class SimBridge:
     """Normalize vision telemetry and hand observations to a local simulator.
@@ -34,10 +41,10 @@ class SimBridge:
             simulation consumer.
     """
 
-    PLC_X_BOUNDS_MM = (-463.2, 370.5)
-    PLC_Y_BOUNDS_MM = (53.7, 789.5)
-    PHYSICAL_TABLE_LENGTH_MM = 1940.0
-    PHYSICAL_TABLE_WIDTH_MM = 1020.0
+    PLC_X_BOUNDS_MM = CONTRACT_PLC_X_BOUNDS_MM
+    PLC_Y_BOUNDS_MM = CONTRACT_PLC_Y_BOUNDS_MM
+    PHYSICAL_TABLE_LENGTH_MM = CONTRACT_FIELD_LENGTH_M * 1000.0
+    PHYSICAL_TABLE_WIDTH_MM = CONTRACT_FIELD_WIDTH_M * 1000.0
     PLC_X_CENTER_MM = sum(PLC_X_BOUNDS_MM) / 2.0
     MAX_TRIM_MM = 35.0
 
@@ -82,6 +89,7 @@ class SimBridge:
         self._plc_robot_pose_mm: tuple[float, float] | None = None
         self._plc_pose_samples: deque[tuple[float, float, float]] = deque(maxlen=32)
         self._plc_robot_speed_mm_s: float | None = None
+        self._plc_robot_velocity_vector_mm_s: tuple[float, float] | None = None
         self._calibration_offset_mm = (0.0, 0.0)
         self.robot_trim_x_mm = 0.0
         self.robot_trim_y_mm = 0.0
@@ -222,19 +230,55 @@ class SimBridge:
         self._plc_pose_samples.append((now, pose[0], pose[1]))
         while (
             len(self._plc_pose_samples) > 2
-            and self._plc_pose_samples[1][0] <= now - 0.1
+            and self._plc_pose_samples[1][0] <= now - 0.15
         ):
             self._plc_pose_samples.popleft()
-        first_sample = self._plc_pose_samples[0]
-        elapsed = now - first_sample[0]
-        self._plc_robot_speed_mm_s = (
-            float(np.hypot(pose[0] - first_sample[1], pose[1] - first_sample[2]) / elapsed)
-            if elapsed >= 0.05
-            else None
-        )
+        previous_sample = self._plc_pose_samples[-2] if len(self._plc_pose_samples) > 1 else None
+        if previous_sample is None or now - previous_sample[0] <= 0.0:
+            self._plc_robot_speed_mm_s = None
+        else:
+            elapsed = now - previous_sample[0]
+            self._plc_robot_speed_mm_s = float(
+                np.hypot(
+                    pose[0] - previous_sample[1],
+                    pose[1] - previous_sample[2],
+                )
+                / elapsed
+            )
+        self._update_filtered_robot_velocity(now)
         if self._raw_puck is not None:
             self._observation = self._calculate_observation()
             self._publish_latest(self._observation)
+
+    def _update_filtered_robot_velocity(self, now: float) -> None:
+        """Estimate signed velocity with a robust slope over recent PLC poses."""
+        cutoff = now - 0.15
+        samples = [sample for sample in self._plc_pose_samples if sample[0] >= cutoff]
+        if len(samples) < 2 or samples[-1][0] - samples[0][0] < 0.05:
+            self._plc_robot_velocity_vector_mm_s = None
+            return
+
+        slopes_x: list[float] = []
+        slopes_y: list[float] = []
+        for index, (first_time, first_x, first_y) in enumerate(samples[:-1]):
+            for last_time, last_x, last_y in samples[index + 1 :]:
+                elapsed = last_time - first_time
+                if elapsed > 0.0:
+                    slopes_x.append((last_x - first_x) / elapsed)
+                    slopes_y.append((last_y - first_y) / elapsed)
+        measured = (
+            float(np.median(slopes_x)),
+            float(np.median(slopes_y)),
+        )
+        previous = self._plc_robot_velocity_vector_mm_s
+        if previous is None:
+            self._plc_robot_velocity_vector_mm_s = measured
+        else:
+            smoothing = 0.35
+            self._plc_robot_velocity_vector_mm_s = (
+                previous[0] * (1.0 - smoothing) + measured[0] * smoothing,
+                previous[1] * (1.0 - smoothing) + measured[1] * smoothing,
+            )
 
     @property
     def plc_robot_position_mm(self) -> tuple[float, float] | None:
@@ -246,6 +290,7 @@ class SimBridge:
         self._plc_robot_pose_mm = None
         self._plc_pose_samples.clear()
         self._plc_robot_speed_mm_s = None
+        self._plc_robot_velocity_vector_mm_s = None
         if self._raw_puck is not None:
             self._observation = self._calculate_observation()
             self._publish_latest(self._observation)
@@ -257,18 +302,14 @@ class SimBridge:
 
     @property
     def plc_robot_velocity_mm_s(self) -> tuple[float, float] | None:
-        """Return signed PLC-axis robot velocity after enough pose samples."""
-        if len(self._plc_pose_samples) < 2:
+        """Return filtered signed PLC-axis velocity, or ``None`` if not fresh."""
+        if (
+            self._plc_robot_velocity_vector_mm_s is None
+            or not self._plc_pose_samples
+            or time.monotonic() - self._plc_pose_samples[-1][0] > 0.1
+        ):
             return None
-        first = self._plc_pose_samples[0]
-        last = self._plc_pose_samples[-1]
-        elapsed = last[0] - first[0]
-        if elapsed < 0.05:
-            return None
-        return (
-            (last[1] - first[1]) / elapsed,
-            (last[2] - first[2]) / elapsed,
-        )
+        return self._plc_robot_velocity_vector_mm_s
 
     @property
     def has_opponent_position(self) -> bool:
@@ -383,6 +424,92 @@ class SimBridge:
             dtype=np.float64,
         )
         return puck_pos_m, puck_vel_mps, robot_pos_m
+
+    def get_training_physical_state(
+        self,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
+        """Return calibrated SI states in training [length, width] axes."""
+        if not self._physical_table_calibrated or self._raw_puck is None:
+            return None
+
+        puck_state = self.get_opponent_physical_state()
+        if puck_state is None:
+            puck_x, puck_y, puck_vx, puck_vy, frame_rate = self._raw_puck
+            puck_point = self._correct_table_point(
+                self._transform_point(puck_x, puck_y)
+            )
+            velocity_endpoint = self._correct_table_point(
+                self._transform_point(puck_x + puck_vx, puck_y + puck_vy)
+            )
+            puck_position = np.asarray(
+                [-puck_point[1] / 1000.0, puck_point[0] / 1000.0],
+                dtype=np.float64,
+            )
+            puck_velocity = np.asarray(
+                [
+                    -(velocity_endpoint[1] - puck_point[1])
+                    * frame_rate
+                    / 1000.0,
+                    (velocity_endpoint[0] - puck_point[0])
+                    * frame_rate
+                    / 1000.0,
+                ],
+                dtype=np.float64,
+            )
+        else:
+            puck_position = np.asarray(
+                [-puck_state[0][0], puck_state[0][1]], dtype=np.float64
+            )
+            puck_velocity = np.asarray(
+                [-puck_state[1][0], puck_state[1][1]], dtype=np.float64
+            )
+
+        if self._opponent_xy is None:
+            opponent_position = np.asarray(
+                [CONTRACT_FIELD_LENGTH_M * 0.36, 0.0], dtype=np.float64
+            )
+        else:
+            opponent_point = self._correct_table_point(
+                self._transform_point(*self._opponent_xy)
+            )
+            opponent_position = np.asarray(
+                [-opponent_point[1] / 1000.0, opponent_point[0] / 1000.0],
+                dtype=np.float64,
+            )
+
+        robot_position_mm = self.robot_position_mm()
+        if robot_position_mm is None:
+            if self._robot_xy is None:
+                return None
+            robot_point = self._correct_table_point(
+                self._transform_point(*self._robot_xy)
+            )
+            robot_position = np.asarray(
+                [-robot_point[1] / 1000.0, robot_point[0] / 1000.0],
+                dtype=np.float64,
+            )
+        else:
+            robot_position = np.asarray(
+                [-robot_position_mm[1] / 1000.0, robot_position_mm[0] / 1000.0],
+                dtype=np.float64,
+            )
+
+        plc_velocity = self.plc_robot_velocity_mm_s
+        robot_velocity = (
+            np.asarray([0.0, 0.0], dtype=np.float64)
+            if plc_velocity is None
+            else np.asarray(
+                [-plc_velocity[1] / 1000.0, plc_velocity[0] / 1000.0],
+                dtype=np.float64,
+            )
+        )
+        return (
+            puck_position,
+            puck_velocity,
+            opponent_position,
+            robot_position,
+            robot_velocity,
+        )
 
     def _rebuild_perspective_matrix(self) -> None:
         if self._table_corners is None:

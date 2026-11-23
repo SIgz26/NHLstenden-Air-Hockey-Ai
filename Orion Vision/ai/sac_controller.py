@@ -6,6 +6,8 @@ from importlib import import_module
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from core.coordinate_contract import physical_state_to_observation
+
 try:
     np: Any = import_module("numpy")
 except Exception as exc:
@@ -105,12 +107,6 @@ def get_torch_runtime() -> Any:
 class LiveSACController:
     """Load a trained SAC policy and map the live observation to two actions."""
 
-    FIELD_LENGTH_M = 1.95
-    FIELD_WIDTH_M = 0.98
-    MAX_PUCK_SPEED_MPS = 5.0
-    MAX_RELATIVE_SPEED_MPS = 7.5
-    DEFAULT_OPPONENT_LENGTH_NORM = 0.72
-
     def __init__(self, sim_bridge: SimBridge, model: Any | None = None) -> None:
         self.sim_bridge = sim_bridge
         self.model = model
@@ -150,8 +146,8 @@ class LiveSACController:
         self.model = model
         if observation_shape == (12,):
             self.observation_adapter_status = (
-                "12D SAC model; 8->12 adapter active (training axes/side aligned, "
-                "field and SI-velocity scales applied, opponent fallback enabled)"
+                "12D SAC model; shared physical-state 8->12 adapter active "
+                "(training axes, SI scales, PLC velocity estimate)"
             )
         else:
             self.observation_adapter_status = (
@@ -184,100 +180,20 @@ class LiveSACController:
                 "The 8->12 SAC observation adapter requires calibrated physical table bounds"
             )
 
-        bridge = self.sim_bridge
-        # Bridge index 1 already points toward the training opponent when
-        # invert_y is enabled; reverse it only for non-inverted image axes.
-        length_sign = 1.0 if bridge.invert_y else -1.0
-
-        half_length_m = bridge.PHYSICAL_TABLE_LENGTH_MM / 2000.0
-        half_width_m = bridge.PHYSICAL_TABLE_WIDTH_MM / 2000.0
-        training_half_length_m = self.FIELD_LENGTH_M / 2.0
-        training_half_width_m = self.FIELD_WIDTH_M / 2.0
-        if bridge.sim_dt <= 0.0:
-            raise ValueError("SimBridge sim_dt must be greater than zero")
-
-        puck_length = (
-            length_sign
-            * float(vector[1])
-            * half_length_m
-            / training_half_length_m
-        )
-        puck_width = (
-            float(vector[0]) * half_width_m / training_half_width_m
-        )
-        puck_length_speed = (
-            length_sign * float(vector[3]) * half_length_m / bridge.sim_dt
-        )
-        puck_width_speed = float(vector[2]) * half_width_m / bridge.sim_dt
-
-        if bridge.has_opponent_position:
-            opponent_length = (
-                length_sign
-                * float(vector[5])
-                * half_length_m
-                / training_half_length_m
+        physical_state = self.sim_bridge.get_training_physical_state()
+        if physical_state is None:
+            raise RuntimeError(
+                "The 8->12 adapter needs a puck sample and robot position in "
+                "calibrated physical table coordinates"
             )
-            opponent_width = (
-                float(vector[4]) * half_width_m / training_half_width_m
-            )
-        else:
-            opponent_length = self.DEFAULT_OPPONENT_LENGTH_NORM
-            opponent_width = 0.0
-
-        robot_position_mm = bridge.robot_position_mm()
-        if robot_position_mm is None:
-            robot_length = (
-                length_sign
-                * float(vector[7])
-                * half_length_m
-                / training_half_length_m
-            )
-            robot_width = (
-                float(vector[6]) * half_width_m / training_half_width_m
-            )
-        else:
-            robot_length = -robot_position_mm[1] / (
-                1000.0 * training_half_length_m
-            )
-            robot_width = robot_position_mm[0] / (
-                1000.0 * training_half_width_m
-            )
-
-        robot_velocity = bridge.plc_robot_velocity_mm_s
-        if robot_velocity is None:
-            robot_length_speed = 0.0
-            robot_width_speed = 0.0
-        else:
-            robot_width_speed = robot_velocity[0] / 1000.0
-            robot_length_speed = -robot_velocity[1] / 1000.0
-
-        adapted = np.asarray(
-            [
-                puck_length,
-                puck_width,
-                puck_length_speed / self.MAX_PUCK_SPEED_MPS,
-                puck_width_speed / self.MAX_PUCK_SPEED_MPS,
-                opponent_length,
-                opponent_width,
-                robot_length,
-                robot_width,
-                (puck_length - robot_length) * 0.5,
-                (puck_width - robot_width) * 0.5,
-                (puck_length_speed - robot_length_speed)
-                / self.MAX_RELATIVE_SPEED_MPS,
-                (puck_width_speed - robot_width_speed)
-                / self.MAX_RELATIVE_SPEED_MPS,
-            ],
-            dtype=np.float32,
-        )
-        return np.clip(adapted, -1.0, 1.0)
+        return physical_state_to_observation(*physical_state)
 
     def predict_action(self) -> tuple[float, float]:
-        """Return ``(target_vx, target_vy)`` for the newest 8D observation.
+        """Return normalized ``(length_action, width_action)`` for live state.
 
         The model is called deterministically for live control. The returned
         action is intentionally validated instead of silently clipping it;
-        map/clamp model outputs to actuator units at the controller boundary.
+        the shared coordinate contract maps it to bounded actuator units.
         """
         if self.model is None:
             raise RuntimeError("No SAC model is loaded")

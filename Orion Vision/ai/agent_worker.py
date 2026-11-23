@@ -7,7 +7,7 @@ import threading
 from collections.abc import Callable
 
 from ai.sac_controller import LiveSACController, check_sac_runtime
-from core.opcua_worker import limit_velocity
+from core.coordinate_contract import action_to_plc_velocity_mm_s
 from PyQt5.QtCore import QThread, pyqtSignal
 
 ActionSink = Callable[[float, float], None]
@@ -24,8 +24,6 @@ class SACAgentWorker(QThread):
 
     action_updated = pyqtSignal(float, float)
     error_occurred = pyqtSignal(str)
-    MAX_ACTION_SPEED_MM_S = 2500.0
-
     def __init__(
         self,
         controller: LiveSACController,
@@ -49,13 +47,10 @@ class SACAgentWorker(QThread):
 
     @classmethod
     def _to_plc_velocity(
-        cls, target_vx: float, target_vy: float
+        cls, action_length: float, action_width: float
     ) -> tuple[float, float]:
-        """Convert policy actions to PLC axes and apply the PLC velocity limits."""
-        return limit_velocity(
-            target_vy * cls.MAX_ACTION_SPEED_MM_S,
-            -target_vx * cls.MAX_ACTION_SPEED_MM_S,
-        )
+        """Convert a normalized policy action to bounded PLC X/Y in mm/s."""
+        return action_to_plc_velocity_mm_s((action_length, action_width))
 
     def stop(self) -> None:
         """Request the inference loop to stop after its current iteration."""
@@ -79,13 +74,15 @@ class SACAgentWorker(QThread):
                     bridge.physical_table_calibrated
                     and bridge.has_fresh_puck_detection(max_age_s=0.25)
                 ):
-                    target_vx, target_vy = self.controller.predict_action()
+                    action_length, action_width = self.controller.predict_action()
                 else:
-                    target_vx = target_vy = 0.0
+                    action_length = action_width = 0.0
                 action_sink = self._action_sink
                 if action_sink is not None:
-                    action_sink(*self._to_plc_velocity(target_vx, target_vy))
-                self.action_updated.emit(target_vx, target_vy)
+                    action_sink(
+                        *self._to_plc_velocity(action_length, action_width)
+                    )
+                self.action_updated.emit(action_length, action_width)
                 self.completed_steps += 1
             except Exception as exc:
                 action_sink = self._action_sink

@@ -30,18 +30,25 @@
   - `4 (BL)`: Eigen robot-kant, zijwand `X_min` (`-510 mm, +970 mm`)
 - **Robot werkgebied:** Beslaat uitsluitend de eigen tafelhelft van `Y = 789.5 mm` (eigen doel) tot `Y = 53.7 mm` (middenlijn).
 
-## 3. Overzicht per Softwarelaag
-| Laag | Lengte-as (Goal ↔ Goal) | Breedte-as (Zijkant ↔ Zijkant) | Nulpunt & Richting |
-| :--- | :--- | :--- | :--- |
-| **CODESYS PLC** | `PLC-Y` (`53.7 .. 789.5 mm`) | `PLC-X` (`-463.2 .. 370.5 mm`) | `Y = 789.5` = eigen doel; `-Vy` = naar voren (max `1000 mm/s`), `+Vy` & `Vx` max `850 mm/s`. |
-| **Virtual Twin (Scherm)** | Horizontaal (`-1` links = doel, `+1` rechts) | Verticaal (`-1` onder, `+1` boven) | `Vy`-pijl horizontaal (`-Vy` wijst naar rechts/voren), `Vx`-pijl verticaal. |
-| **Scripted Opponents** | Index `[0]`: puck in full-table-frame (`-0.97 .. +0.97 m`); robot: PLC-Y `53.7 .. 789.5 mm` → `0.0 .. +0.7358 m` (1-op-1, zonder rek) | Index `[1]`: puck in full-table-frame (`-0.51 .. +0.51 m`); robot: PLC-X gecentreerd rond `-46.35 mm` (`-0.4169 .. +0.4169 m`) | Voor de robot is `0.0 m` de middenlijn en `+0.7358 m` het eigen doel; `-vel[0]` = naar voren (`-rTargetVy`, max `1.0 m/s`). |
-| **SAC Agent (RL)** | Index `[0]` (`-1.0 .. 1.0`) | Index `[1]` (`-1.0 .. 1.0`) | `-1.0` = eigen doel, `0.0` = middenlijn (`Y = 53.7`); `+act[0]` = naar voren (`-rTargetVy`). |
+## 3. Gedeeld RL-contract (`core/coordinate_contract.py`)
+- Alle fysieke toestanden gebruiken SI-eenheden en `[lengte, breedte]`-volgorde.
+- De trainingslengte-as is positief naar de tegenstander; de robot speelt op negatieve lengte. PLC-Y is positief naar het eigen doel, dus `training_length = -(PLC-Y - 53.7 mm)`.
+- Training- en live tafelafmetingen zijn identiek: `1.94 m` lang × `1.02 m` breed.
+- Het actieve robotgebied met `95 mm` randmarge is lengte `[-0.6408, -0.095] m` en breedte `[-0.415, +0.415] m`.
 
-## 4. SAC Agent (RL-Policy: `air_hockey_env.py` ↔ `SACController` / `AgentWorker`)
-- **Observatievector (`obs[0..7]` in `[-1.0, 1.0]`, lengte eerst, breedte tweede):**
-  - As-volgorde uit `SimBridge` herschikken via indices `[1, 0, 3, 2, 5, 4, 7, 6]`.
-  - `obs[2], obs[3]`: fysieke pucksnelheid in `m/s` gedeeld door `5.0 m/s`, geclipt op `[-1.0, 1.0]`.
-  - `obs[6]`: robot-lengte herprojecteren naar eigen helft `[-1.0, 0.0]` via `(sim_robot_y - 1.0) / 2.0` (`-1.0` = eigen doel `789.5 mm`, `0.0` = middenlijn `53.7 mm`).
-- **Actievector (`action[0..1]` in `[-1.0, 1.0]`):**
-  - `rTargetVx = action[1] * 850.0` (`mm/s`), `rTargetVy = -action[0] * (1000.0 if action[0] > 0 else 850.0)` (`mm/s`).
+### Observatie (12D, `[-1, 1]`)
+`air_hockey_env.py` en de 8D SimBridge-adapter gebruiken dezelfde functie `physical_state_to_observation`:
+1. `[0:2]` puckpositie `[lengte, breedte]`, gedeeld door de halve veldafmetingen.
+2. `[2:4]` pucksnelheid `[lengte, breedte]`, gedeeld door `5.0 m/s`.
+3. `[4:6]` tegenstanderpositie, gedeeld door de halve veldafmetingen; zonder marker staat de tegenstander op `(0.36 * veldlengte, 0)`.
+4. `[6:8]` robotpositie, gedeeld door de halve veldafmetingen.
+5. `[8:10]` puckpositie minus robotpositie, gedeeld door de volledige veldafmetingen.
+6. `[10:12]` puck- minus robotsnelheid, gedeeld door `6.0 m/s`.
+
+SimBridge levert voor de SAC-adapter SI-posities/snelheden uit de gekalibreerde homografie en PLC-pose. De PLC-robotsnelheid is een robuuste mediaan van recente signed `Δpos/Δt`-hellingen, met een korte laagdoorlaatfilter; zonder verse metingen wordt `None` gebruikt en vult het contract nul in.
+
+### Actie en fysica
+- SAC-acties zijn `[lengtesnelheid, breedtesnelheid]`, genormaliseerd in `[-1, 1]`.
+- De gedeelde actieconversie begrenst voorwaarts op `1.0 m/s`, achterwaarts/zijwaarts op `0.85 m/s` en de gezamenlijke H-bot-motorsnelheid op `1.0 m/s`. De PLC krijgt dezelfde vector in zijn assen (`Vx = breedte`, `Vy = -lengte`) en in `mm/s`.
+- De trainingsomgeving gebruikt `10 ms` stappen, `2.8 m/s²` motorversnelling, dezelfde snelheidslimieten, het actieve werkgebied en één stap actievertraging.
+- Een 8D Live View-waarneming wordt alleen met gekalibreerde tafelcoördinaten naar deze 12D-contractvector omgezet; onbekende modeldimensies blijven afgewezen.

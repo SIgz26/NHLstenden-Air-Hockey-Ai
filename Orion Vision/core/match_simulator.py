@@ -9,6 +9,11 @@ import numpy as np
 from stable_baselines3 import PPO, SAC
 
 from ai.air_hockey_env import AirHockeyGymEnv
+from core.coordinate_contract import (
+    ROBOT_LENGTH_BOUNDS_M,
+    ROBOT_WIDTH_BOUNDS_M,
+    action_to_velocity_mps,
+)
 
 HUMAN_VS_AI = "human_vs_ai"
 AI_VS_AI = "ai_vs_ai"
@@ -55,8 +60,8 @@ def mouse_position_to_world(
     field_height: float,
     field_length_m: float = AirHockeyGymEnv.FIELD_LENGTH_M,
     field_width_m: float = AirHockeyGymEnv.FIELD_WIDTH_M,
-    min_x_m: float = -0.925,
-    max_x_m: float = -0.15,
+    min_x_m: float = ROBOT_LENGTH_BOUNDS_M[0],
+    max_x_m: float = ROBOT_LENGTH_BOUNDS_M[1],
     mallet_radius_m: float = AirHockeyGymEnv.MALLET_RADIUS_M,
 ) -> tuple[float, float]:
     """Convert a screen point into a legal left-side mallet target in meters."""
@@ -66,9 +71,9 @@ def mouse_position_to_world(
     y_fraction = np.clip((mouse_y - field_top) / field_height, 0.0, 1.0)
     x_m = (x_fraction - 0.5) * field_length_m
     y_m = (0.5 - y_fraction) * field_width_m
-    legal_min_x = -field_length_m / 2.0 + mallet_radius_m
-    legal_min_y = -field_width_m / 2.0 + mallet_radius_m
-    legal_max_y = field_width_m / 2.0 - mallet_radius_m
+    legal_min_x = max(-field_length_m / 2.0 + mallet_radius_m, min_x_m)
+    legal_min_y = ROBOT_WIDTH_BOUNDS_M[0]
+    legal_max_y = ROBOT_WIDTH_BOUNDS_M[1]
     return (
         float(np.clip(x_m, max(min_x_m, legal_min_x), min(max_x_m, -mallet_radius_m))),
         float(np.clip(y_m, legal_min_y, legal_max_y)),
@@ -150,22 +155,20 @@ class MatchSimulator:
             reset_b(mirror_observation_for_right_player(self.observation))
 
     def set_mouse_target(self, x_m: float, y_m: float) -> None:
-        half_width = self.env.FIELD_WIDTH_M / 2.0 - self.env.MALLET_RADIUS_M
         self.mouse_target_m = np.asarray(
             [
-                np.clip(x_m, -self.env.FIELD_LENGTH_M / 2.0 + self.env.MALLET_RADIUS_M, -0.15),
-                np.clip(y_m, -half_width, half_width),
+                np.clip(x_m, ROBOT_LENGTH_BOUNDS_M[0], ROBOT_LENGTH_BOUNDS_M[1]),
+                np.clip(y_m, ROBOT_WIDTH_BOUNDS_M[0], ROBOT_WIDTH_BOUNDS_M[1]),
             ],
             dtype=np.float64,
         )
 
     def _human_action(self) -> np.ndarray:
         delta = self.mouse_target_m - self.env.robot_position_m
-        target_speed = np.clip(delta * 8.0, -self.env.MAX_MALLET_SPEED_MPS, self.env.MAX_MALLET_SPEED_MPS)
-        return np.asarray(target_speed / self.env.MAX_MALLET_SPEED_MPS, dtype=np.float32)
+        return np.asarray(np.clip(delta * 8.0, -1.0, 1.0), dtype=np.float32)
 
     def _advance_model_opponent(self, action: np.ndarray) -> None:
-        target_velocity = np.clip(action, -1.0, 1.0) * self.env.MAX_MALLET_SPEED_MPS
+        target_velocity = action_to_velocity_mps(action)
         half_length = self.env.FIELD_LENGTH_M / 2.0
         self.env._advance_mallet(
             self.env._opponent_position,
@@ -175,7 +178,7 @@ class MatchSimulator:
         )
 
     def step(self):
-        """Advance one 120 Hz simulation frame and cache the new state."""
+        """Advance one 100 Hz simulation frame and cache the new state."""
         observation = self.env.observation
         if self.mode == HUMAN_VS_AI:
             left_action = self._human_action()

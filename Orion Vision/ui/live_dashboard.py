@@ -1283,13 +1283,12 @@ class OrionLiveDashboard(QWidget):
         self.lbl_sac_model.setText(f"UNTRAINED TEST MODEL: {dummy_model_path.name}")
         return True
 
-    def _on_sac_action(self, target_vx: float, target_vy: float) -> None:
-        """Forward actions to actuator adapters and refresh the GUI labels."""
-        self._latest_sac_action = (target_vx, target_vy)
-        self.sac_action_ready.emit(target_vx, target_vy)
-        vx_mm_s, vy_mm_s = limit_velocity(
-            target_vy * SACAgentWorker.MAX_ACTION_SPEED_MM_S,
-            -target_vx * SACAgentWorker.MAX_ACTION_SPEED_MM_S,
+    def _on_sac_action(self, action_length: float, action_width: float) -> None:
+        """Forward normalized length/width actions and refresh GUI labels."""
+        self._latest_sac_action = (action_length, action_width)
+        self.sac_action_ready.emit(action_length, action_width)
+        vx_mm_s, vy_mm_s = SACAgentWorker._to_plc_velocity(
+            action_length, action_width
         )
         self.lbl_sac_action.setText(
             f"Target Vx: {vx_mm_s:+.1f} mm/s    Target Vy: {vy_mm_s:+.1f} mm/s"

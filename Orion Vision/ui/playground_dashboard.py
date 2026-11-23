@@ -91,9 +91,9 @@ class MatchFieldWidget(DigitalTwinWidget):
 
 
 class PlaygroundDashboard(QWidget):
-    """Configure and run a local 120 Hz match simulation."""
+    """Configure and run a local 100 Hz match simulation."""
 
-    SIM_DT = 1.0 / 120.0
+    SIM_DT = AirHockeyGymEnv.DT
 
     def __init__(self, on_back_callback=None) -> None:
         super().__init__()

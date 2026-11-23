@@ -6,6 +6,22 @@ import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
 
+from core.coordinate_contract import (
+    CONTROL_DT_S,
+    FIELD_LENGTH_M as CONTRACT_FIELD_LENGTH_M,
+    FIELD_WIDTH_M as CONTRACT_FIELD_WIDTH_M,
+    MALLET_FORWARD_MAX_SPEED_MPS,
+    MALLET_LATERAL_MAX_SPEED_MPS,
+    MALLET_MAX_ACCELERATION_MPS2,
+    MALLET_REVERSE_MAX_SPEED_MPS,
+    MAX_RELATIVE_SPEED_MPS as CONTRACT_MAX_RELATIVE_SPEED_MPS,
+    MOTOR_MAX_SPEED_MPS,
+    PUCK_MAX_SPEED_MPS as CONTRACT_PUCK_MAX_SPEED_MPS,
+    ROBOT_LENGTH_BOUNDS_M,
+    ROBOT_WIDTH_BOUNDS_M,
+    action_to_velocity_mps,
+    physical_state_to_observation,
+)
 from ai.opponents.attacker import AttackerOpponent, ComplexOpponent
 
 
@@ -40,21 +56,21 @@ class AirHockeyGymEnv(gym.Env[np.ndarray, np.ndarray]):
     REWARD_MODES = ("aggressive", "balanced", "defensive")
     metadata = {"render_modes": []}
 
-    FIELD_LENGTH_M = 1.95
-    FIELD_WIDTH_M = 0.98
+    FIELD_LENGTH_M = CONTRACT_FIELD_LENGTH_M
+    FIELD_WIDTH_M = CONTRACT_FIELD_WIDTH_M
     PUCK_RADIUS_M = 0.031
     PUCK_MASS_KG = 0.020
     MALLET_RADIUS_M = 0.048
     MALLET_MASS_KG = 0.110
     RESTITUTION = 0.85
     WALL_DAMPING = 0.90
-    MAX_MALLET_ACCELERATION_MPS2 = 12.0
-    MAX_MALLET_SPEED_MPS = 2.5
-    MAX_PUCK_SPEED_MPS = 5.0
-    MAX_RELATIVE_SPEED_MPS = MAX_PUCK_SPEED_MPS + MAX_MALLET_SPEED_MPS
+    MAX_MALLET_ACCELERATION_MPS2 = MALLET_MAX_ACCELERATION_MPS2
+    MAX_MALLET_SPEED_MPS = MALLET_FORWARD_MAX_SPEED_MPS
+    MAX_PUCK_SPEED_MPS = CONTRACT_PUCK_MAX_SPEED_MPS
+    MAX_RELATIVE_SPEED_MPS = CONTRACT_MAX_RELATIVE_SPEED_MPS
     PUCK_AIR_FRICTION = 0.005
     GOAL_WIDTH_M = 0.30
-    DT = 1.0 / 120.0
+    DT = CONTROL_DT_S
     CONTACT_SLOP_M = 1e-5
 
     VALID_OPPONENT_TYPES = ("none", "static", "complex")
@@ -83,6 +99,7 @@ class AirHockeyGymEnv(gym.Env[np.ndarray, np.ndarray]):
         self._puck_velocity = np.zeros(2, dtype=np.float64)
         self._robot_position = np.zeros(2, dtype=np.float64)
         self._robot_velocity = np.zeros(2, dtype=np.float64)
+        self._pending_robot_velocity = np.zeros(2, dtype=np.float64)
         self._opponent_position = np.zeros(2, dtype=np.float64)
         self._opponent_velocity = np.zeros(2, dtype=np.float64)
         self._steps = 0
@@ -160,8 +177,9 @@ class AirHockeyGymEnv(gym.Env[np.ndarray, np.ndarray]):
             direction * speed * np.cos(angle),
             speed * np.sin(angle),
         )
-        self._robot_position[:] = (-half_length * 0.72, self._rng.uniform(-0.15, 0.15))
+        self._robot_position[:] = (-0.55, self._rng.uniform(-0.15, 0.15))
         self._robot_velocity[:] = 0.0
+        self._pending_robot_velocity[:] = 0.0
         if self.opponent_type == "static":
             self._opponent_position[:] = (half_length * 0.72, 0.0)
         else:
@@ -176,21 +194,25 @@ class AirHockeyGymEnv(gym.Env[np.ndarray, np.ndarray]):
         return self._observation.copy(), {}
 
     def step(self, action: np.ndarray):
-        target_velocity = np.asarray(action, dtype=np.float64).reshape(2)
-        if not np.isfinite(target_velocity).all():
-            raise ValueError("action must contain finite values")
-        target_velocity = np.clip(target_velocity, -1.0, 1.0) * self.MAX_MALLET_SPEED_MPS
-        
+        target_velocity = action_to_velocity_mps(action)
+        applied_target_velocity = self._pending_robot_velocity.copy()
+        self._pending_robot_velocity = target_velocity
+
         self._steps += 1
         previous_puck_x = float(self._puck_position[0])
         previous_robot_puck_distance = self._previous_robot_puck_distance
         half_length = self.FIELD_LENGTH_M / 2.0
         half_width = self.FIELD_WIDTH_M / 2.0
-        max_y = half_width - self.MALLET_RADIUS_M
+        max_y = ROBOT_WIDTH_BOUNDS_M[1]
 
         # 1. Verplaats mallets
-        self._advance_mallet(self._robot_position, self._robot_velocity, target_velocity,
-                             (-half_length + self.MALLET_RADIUS_M, -0.15))
+        self._advance_mallet(
+            self._robot_position,
+            self._robot_velocity,
+            applied_target_velocity,
+            ROBOT_LENGTH_BOUNDS_M,
+            y_limits=ROBOT_WIDTH_BOUNDS_M,
+        )
 
         if self.opponent_type == "complex" and self.opponent is not None:
             desired_opponent_vel = self.opponent.get_action(
@@ -274,7 +296,7 @@ class AirHockeyGymEnv(gym.Env[np.ndarray, np.ndarray]):
             and self._robot_position[0] > self._puck_position[0]
             and self._puck_velocity[0] > 0.8
             and attack_distance < 0.40
-            and target_velocity[0] > 0.5
+            and applied_target_velocity[0] > 0.5
         ):
             reward += 2.5 * min(1.0, self._puck_velocity[0] / 1.5)
 
@@ -285,31 +307,37 @@ class AirHockeyGymEnv(gym.Env[np.ndarray, np.ndarray]):
         if current_y_abs > (max_y - y_threshold):
             y_proximity = (current_y_abs - (max_y - y_threshold)) / y_threshold
             reward -= (reward_profile["wall_penalty"] * 2.5) * max(0.0, y_proximity)
-            pushing_into_side_wall = (self._robot_position[1] > 0.0 and target_velocity[1] > 0.1) or (
-                self._robot_position[1] < 0.0 and target_velocity[1] < -0.1
+            pushing_into_side_wall = (self._robot_position[1] > 0.0 and applied_target_velocity[1] > 0.1) or (
+                self._robot_position[1] < 0.0 and applied_target_velocity[1] < -0.1
             )
             if pushing_into_side_wall:
-                reward -= 0.10 * (abs(target_velocity[1]) / self.MAX_MALLET_SPEED_MPS)
+                reward -= 0.10 * (
+                    abs(applied_target_velocity[1]) / MALLET_LATERAL_MAX_SPEED_MPS
+                )
 
         # 2a. Wand penalty voor voorwaartse middellijn grens (X = -0.15)
         # Voorkomt dat de robot continu tegen het fysieke H-portaal / tegenstandergrens drukt
-        x_limit_front = -0.15
+        x_limit_front = ROBOT_LENGTH_BOUNDS_M[1]
         front_threshold = 0.08
         if self._robot_position[0] > (x_limit_front - front_threshold):
             front_proximity = (self._robot_position[0] - (x_limit_front - front_threshold)) / front_threshold
             reward -= (reward_profile["wall_penalty"] * 2.5) * max(0.0, front_proximity)
-            if target_velocity[0] > 0.1:
-                reward -= 0.10 * (target_velocity[0] / self.MAX_MALLET_SPEED_MPS)
+            if applied_target_velocity[0] > 0.1:
+                reward -= 0.10 * (
+                    applied_target_velocity[0] / MALLET_FORWARD_MAX_SPEED_MPS
+                )
 
         # 2b. Wand penalty voor achterwand / eigen doel (X = -half_length + MALLET_RADIUS_M)
         # Voorkomt dat de robot achteruit tegen het eigen doel of mechanische eindstoppen beukt
-        x_limit_back = -half_length + self.MALLET_RADIUS_M
+        x_limit_back = ROBOT_LENGTH_BOUNDS_M[0]
         back_threshold = 0.08
         if self._robot_position[0] < (x_limit_back + back_threshold):
             back_proximity = ((x_limit_back + back_threshold) - self._robot_position[0]) / back_threshold
             reward -= (reward_profile["wall_penalty"] * 2.5) * max(0.0, back_proximity)
-            if target_velocity[0] < -0.1:
-                reward -= 0.10 * (abs(target_velocity[0]) / self.MAX_MALLET_SPEED_MPS)
+            if applied_target_velocity[0] < -0.1:
+                reward -= 0.10 * (
+                    abs(applied_target_velocity[0]) / MALLET_REVERSE_MAX_SPEED_MPS
+                )
 
         if robot_contact and rel_vel_before > 0.8:
             impact_strength = 0.5 + min(1.0, rel_vel_before / 1.5)
@@ -372,17 +400,20 @@ class AirHockeyGymEnv(gym.Env[np.ndarray, np.ndarray]):
         velocity: np.ndarray,
         target_velocity: np.ndarray,
         x_limits: tuple[float, float],
+        y_limits: tuple[float, float] | None = None,
     ) -> None:
-        """Apply acceleration-limited motor response and integrate mallet."""
+        """Apply H-bot motor acceleration/speed limits and integrate a mallet."""
         velocity_delta = target_velocity - velocity
-        delta_speed = float(np.linalg.norm(velocity_delta))
+        delta_motor_speed = abs(float(velocity_delta[0])) + abs(
+            float(velocity_delta[1])
+        )
         max_delta_speed = self.MAX_MALLET_ACCELERATION_MPS2 * self.DT
-        if delta_speed > max_delta_speed:
-            velocity_delta *= max_delta_speed / delta_speed
+        if delta_motor_speed > max_delta_speed:
+            velocity_delta *= max_delta_speed / delta_motor_speed
         velocity += velocity_delta
-        speed = float(np.linalg.norm(velocity))
-        if speed > self.MAX_MALLET_SPEED_MPS:
-            velocity *= self.MAX_MALLET_SPEED_MPS / speed
+        motor_speed = abs(float(velocity[0])) + abs(float(velocity[1]))
+        if motor_speed > MOTOR_MAX_SPEED_MPS:
+            velocity *= MOTOR_MAX_SPEED_MPS / motor_speed
 
         position += velocity * self.DT
         if position[0] <= x_limits[0]:
@@ -394,13 +425,17 @@ class AirHockeyGymEnv(gym.Env[np.ndarray, np.ndarray]):
             if velocity[0] > 0.0:
                 velocity[0] = 0.0
 
-        y_limit = self.FIELD_WIDTH_M / 2.0 - self.MALLET_RADIUS_M
-        if position[1] <= -y_limit:
-            position[1] = -y_limit
+        if y_limits is None:
+            y_limits = (
+                -self.FIELD_WIDTH_M / 2.0 + self.MALLET_RADIUS_M,
+                self.FIELD_WIDTH_M / 2.0 - self.MALLET_RADIUS_M,
+            )
+        if position[1] <= y_limits[0]:
+            position[1] = y_limits[0]
             if velocity[1] < 0.0:
                 velocity[1] = 0.0
-        elif position[1] >= y_limit:
-            position[1] = y_limit
+        elif position[1] >= y_limits[1]:
+            position[1] = y_limits[1]
             if velocity[1] > 0.0:
                 velocity[1] = 0.0
 
@@ -464,26 +499,11 @@ class AirHockeyGymEnv(gym.Env[np.ndarray, np.ndarray]):
         return True
 
     def _make_observation(self) -> np.ndarray:
-        """Normalize SI state to the SimBridge-compatible [-1, 1] vector."""
-        half_length = self.FIELD_LENGTH_M / 2.0
-        half_width = self.FIELD_WIDTH_M / 2.0
-        relative_position = self._puck_position - self._robot_position
-        relative_velocity = self._puck_velocity - self._robot_velocity
-        observation = np.asarray(
-            [
-                self._puck_position[0] / half_length,
-                self._puck_position[1] / half_width,
-                self._puck_velocity[0] / self.MAX_PUCK_SPEED_MPS,
-                self._puck_velocity[1] / self.MAX_PUCK_SPEED_MPS,
-                self._opponent_position[0] / half_length,
-                self._opponent_position[1] / half_width,
-                self._robot_position[0] / half_length,
-                self._robot_position[1] / half_width,
-                relative_position[0] / self.FIELD_LENGTH_M,
-                relative_position[1] / self.FIELD_WIDTH_M,
-                relative_velocity[0] / self.MAX_RELATIVE_SPEED_MPS,
-                relative_velocity[1] / self.MAX_RELATIVE_SPEED_MPS,
-            ],
-            dtype=np.float32,
+        """Return the shared 12D normalized physical-state contract."""
+        return physical_state_to_observation(
+            self._puck_position,
+            self._puck_velocity,
+            self._opponent_position,
+            self._robot_position,
+            self._robot_velocity,
         )
-        return np.clip(observation, -1.0, 1.0)

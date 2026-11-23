@@ -19,6 +19,7 @@ from ai.trainer_worker import (
     SACTrainerWorker,
     linear_schedule,
 )
+from core.coordinate_contract import ROBOT_LENGTH_BOUNDS_M, ROBOT_WIDTH_BOUNDS_M
 from ui.ai_trainer_dashboard import OrionTrainerDashboard
 from ui.main_menu import OrionMainMenu
 
@@ -64,6 +65,7 @@ def test_contact_threshold_and_clear_bonus_reward_logic():
     env._puck_position[:] = (-0.80, 0.0)
     env._puck_velocity[:] = (1.6, 0.0)
 
+    env.step(np.asarray([1.0, 0.0], dtype=np.float32))
     _, reward, _, _, _ = env.step(np.asarray([1.0, 0.0], dtype=np.float32))
 
     assert reward > 2.0
@@ -71,17 +73,17 @@ def test_contact_threshold_and_clear_bonus_reward_logic():
     env.close()
 
 
-def test_robot_is_clamped_to_15_cm_before_center_line():
+def test_robot_is_clamped_to_95_mm_before_center_line():
     env = AirHockeyGymEnv(seed=12, max_episode_steps=5, opponent_type="none")
     env.reset(seed=13)
-    env._robot_position[:] = (-0.16, 0.0)
+    env._robot_position[:] = (-0.10, 0.0)
     env._robot_velocity[:] = (2.5, 0.0)
     env._puck_position[:] = (0.5, 0.3)
     env._puck_velocity[:] = 0.0
 
     env.step(np.asarray([1.0, 0.0], dtype=np.float32))
 
-    assert env.robot_position_m[0] <= -0.15
+    assert env.robot_position_m[0] <= -0.095
     assert env.robot_velocity_mps[0] == 0.0
     env.close()
 
@@ -93,6 +95,7 @@ def test_robot_is_penalized_for_pushing_into_front_boundary():
     pushing_env._robot_velocity[:] = (0.0, 0.0)
     pushing_env._puck_position[:] = (-0.4, 0.2)
     pushing_env._puck_velocity[:] = 0.0
+    pushing_env.step(np.asarray([1.0, 0.0], dtype=np.float32))
     _, push_reward, _, _, _ = pushing_env.step(np.asarray([1.0, 0.0], dtype=np.float32))
 
     neutral_env = AirHockeyGymEnv(seed=12, max_episode_steps=5, opponent_type="none")
@@ -101,6 +104,7 @@ def test_robot_is_penalized_for_pushing_into_front_boundary():
     neutral_env._robot_velocity[:] = (0.0, 0.0)
     neutral_env._puck_position[:] = (-0.4, 0.2)
     neutral_env._puck_velocity[:] = 0.0
+    neutral_env.step(np.asarray([0.0, 0.0], dtype=np.float32))
     _, neutral_reward, _, _, _ = neutral_env.step(np.asarray([0.0, 0.0], dtype=np.float32))
 
     assert push_reward < neutral_reward
@@ -109,13 +113,14 @@ def test_robot_is_penalized_for_pushing_into_front_boundary():
 
 
 def test_robot_is_penalized_for_pushing_into_back_boundary():
-    back_limit = -AirHockeyGymEnv.FIELD_LENGTH_M / 2.0 + AirHockeyGymEnv.MALLET_RADIUS_M
+    back_limit = ROBOT_LENGTH_BOUNDS_M[0]
     pushing_env = AirHockeyGymEnv(seed=12, max_episode_steps=5, opponent_type="none")
     pushing_env.reset(seed=13)
     pushing_env._robot_position[:] = (back_limit, 0.0)
     pushing_env._robot_velocity[:] = (0.0, 0.0)
     pushing_env._puck_position[:] = (-0.4, 0.2)
     pushing_env._puck_velocity[:] = 0.0
+    pushing_env.step(np.asarray([-1.0, 0.0], dtype=np.float32))
     _, push_reward, _, _, _ = pushing_env.step(np.asarray([-1.0, 0.0], dtype=np.float32))
 
     neutral_env = AirHockeyGymEnv(seed=12, max_episode_steps=5, opponent_type="none")
@@ -124,6 +129,7 @@ def test_robot_is_penalized_for_pushing_into_back_boundary():
     neutral_env._robot_velocity[:] = (0.0, 0.0)
     neutral_env._puck_position[:] = (-0.4, 0.2)
     neutral_env._puck_velocity[:] = 0.0
+    neutral_env.step(np.asarray([0.0, 0.0], dtype=np.float32))
     _, neutral_reward, _, _, _ = neutral_env.step(np.asarray([0.0, 0.0], dtype=np.float32))
 
     assert push_reward < neutral_reward
@@ -132,13 +138,14 @@ def test_robot_is_penalized_for_pushing_into_back_boundary():
 
 
 def test_robot_is_penalized_for_pushing_into_y_side_boundary():
-    y_limit = AirHockeyGymEnv.FIELD_WIDTH_M / 2.0 - AirHockeyGymEnv.MALLET_RADIUS_M
+    y_limit = ROBOT_WIDTH_BOUNDS_M[1]
     pushing_env = AirHockeyGymEnv(seed=12, max_episode_steps=5, opponent_type="none")
     pushing_env.reset(seed=13)
     pushing_env._robot_position[:] = (-0.50, y_limit)
     pushing_env._robot_velocity[:] = (0.0, 0.0)
     pushing_env._puck_position[:] = (-0.4, 0.2)
     pushing_env._puck_velocity[:] = 0.0
+    pushing_env.step(np.asarray([0.0, 1.0], dtype=np.float32))
     _, push_reward, _, _, _ = pushing_env.step(np.asarray([0.0, 1.0], dtype=np.float32))
 
     neutral_env = AirHockeyGymEnv(seed=12, max_episode_steps=5, opponent_type="none")
@@ -147,6 +154,7 @@ def test_robot_is_penalized_for_pushing_into_y_side_boundary():
     neutral_env._robot_velocity[:] = (0.0, 0.0)
     neutral_env._puck_position[:] = (-0.4, 0.2)
     neutral_env._puck_velocity[:] = 0.0
+    neutral_env.step(np.asarray([0.0, 0.0], dtype=np.float32))
     _, neutral_reward, _, _, _ = neutral_env.step(np.asarray([0.0, 0.0], dtype=np.float32))
 
     assert push_reward < neutral_reward
@@ -157,14 +165,14 @@ def test_robot_is_penalized_for_pushing_into_y_side_boundary():
 def test_clear_bonus_requires_active_puck_crossing():
     quiet_env = AirHockeyGymEnv(seed=21, opponent_type="none")
     quiet_env.reset(seed=21)
-    quiet_env._robot_position[:] = (-0.7, 0.3)
+    quiet_env._robot_position[:] = (-0.55, 0.3)
     quiet_env._puck_position[:] = (-0.000001, 0.0)
     quiet_env._puck_velocity[:] = (0.001, 0.0)
     _, quiet_reward, _, _, _ = quiet_env.step(np.zeros(2, dtype=np.float32))
 
     active_env = AirHockeyGymEnv(seed=21, opponent_type="none")
     active_env.reset(seed=21)
-    active_env._robot_position[:] = (-0.7, 0.3)
+    active_env._robot_position[:] = (-0.55, 0.3)
     active_env._puck_position[:] = (-0.001, 0.0)
     active_env._puck_velocity[:] = (0.7, 0.0)
     _, active_reward, _, _, _ = active_env.step(np.zeros(2, dtype=np.float32))
@@ -466,16 +474,22 @@ def test_puck_wall_bounce_uses_radius_and_damping():
     env.close()
 
 
-def test_robot_motor_acceleration_is_limited_to_12_mps2():
+def test_robot_motor_acceleration_and_one_step_action_delay_match_plc():
     env = AirHockeyGymEnv(seed=5)
     env.reset(seed=5)
     initial_velocity = env.robot_velocity_mps
 
     env.step(np.asarray([1.0, 0.0], dtype=np.float32))
+    np.testing.assert_array_equal(env.robot_velocity_mps, initial_velocity)
+
+    env.step(np.asarray([1.0, 0.0], dtype=np.float32))
 
     acceleration = np.linalg.norm(env.robot_velocity_mps - initial_velocity) / env.DT
     assert acceleration <= env.MAX_MALLET_ACCELERATION_MPS2 + 1e-6
-    np.testing.assert_allclose(acceleration, 12.0, atol=1e-5)
+    np.testing.assert_allclose(acceleration, 2.8, atol=1e-5)
+    assert env.DT == 0.01
+    assert ROBOT_LENGTH_BOUNDS_M[0] <= env.robot_position_m[0] <= ROBOT_LENGTH_BOUNDS_M[1]
+    assert ROBOT_WIDTH_BOUNDS_M[0] <= env.robot_position_m[1] <= ROBOT_WIDTH_BOUNDS_M[1]
     env.close()
 
 

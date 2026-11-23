@@ -22,10 +22,10 @@ def test_mouse_position_maps_into_legal_left_side_mallet_area():
     left_edge = mouse_position_to_world(10, 70, 10, 20, 200, 100)
     right_edge = mouse_position_to_world(210, 20, 10, 20, 200, 100)
 
-    assert left_edge[0] == -0.925
-    assert right_edge[0] == -0.15
+    assert left_edge[0] == -0.6408
+    assert right_edge[0] == -0.095
     assert np.isclose(left_edge[1], 0.0)
-    assert np.isclose(right_edge[1], 0.442)
+    assert np.isclose(right_edge[1], 0.415)
 
 
 def test_right_player_observation_and_action_mirroring_are_consistent():
@@ -93,7 +93,7 @@ def test_human_vs_ai_clamps_mouse_target_to_left_half(monkeypatch):
     simulator = MatchSimulator(HUMAN_VS_AI, model_b_path="right.zip", seed=7)
     simulator.set_mouse_target(0.8, 0.8)
 
-    assert simulator.mouse_target_m[0] == -0.15
+    assert simulator.mouse_target_m[0] == -0.095
     assert simulator.mouse_target_m[1] < simulator.env.FIELD_WIDTH_M / 2.0
     simulator.step()
     assert simulator.env.robot_position_m[0] <= -0.15
@@ -131,7 +131,7 @@ def test_playground_mode_selection_exposes_only_required_model_controls(monkeypa
     dashboard.mode_selector.setCurrentIndex(2)
     assert dashboard.model_a_selector.isEnabled()
     assert not dashboard.model_b_selector.isEnabled()
-    assert dashboard.SIM_DT == 1.0 / 120.0
+    assert dashboard.SIM_DT == 0.01
     assert dashboard._simulation_timer.interval() == 4
 
     dashboard.close()

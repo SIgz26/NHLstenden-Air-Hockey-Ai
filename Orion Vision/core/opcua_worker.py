@@ -10,6 +10,13 @@ from collections import deque
 from asyncua import Client, ua
 from PyQt5.QtCore import QThread, pyqtSignal
 
+from core.coordinate_contract import (
+    MALLET_FORWARD_MAX_SPEED_MPS,
+    MALLET_LATERAL_MAX_SPEED_MPS,
+    MALLET_REVERSE_MAX_SPEED_MPS,
+    MOTOR_MAX_SPEED_MPS,
+    limit_plc_velocity_mps,
+)
 from Python_OPCUA import NODE_PREFIX, PLC_URL
 
 GVL_MACHINE_PREFIX = "|var|CODESYS Control for Linux SL.Application.GVL_Machine."
@@ -24,30 +31,21 @@ STATE_TEXT_NODE = f"ns=4;s={GVL_MACHINE_PREFIX}sStateText"
 TARGET_VX_NODE = f"ns=4;s={NODE_PREFIX}rTargetVx"
 TARGET_VY_NODE = f"ns=4;s={NODE_PREFIX}rTargetVy"
 
-MAX_LATERAL_SPEED_MM_S = 850.0
-MAX_REVERSE_SPEED_MM_S = 850.0
-MAX_FORWARD_SPEED_MM_S = 1000.0
-MAX_MOTOR_SPEED_MM_S = 1000.0
+MAX_LATERAL_SPEED_MM_S = MALLET_LATERAL_MAX_SPEED_MPS * 1000.0
+MAX_REVERSE_SPEED_MM_S = MALLET_REVERSE_MAX_SPEED_MPS * 1000.0
+MAX_FORWARD_SPEED_MM_S = MALLET_FORWARD_MAX_SPEED_MPS * 1000.0
+MAX_MOTOR_SPEED_MM_S = MOTOR_MAX_SPEED_MPS * 1000.0
 MAX_VISION_SEQUENCE = 0xFFFFFFFF
 WRITE_INTERVAL_S = 0.01
 
 
 def limit_velocity(vx_mm_s: float, vy_mm_s: float) -> tuple[float, float]:
     """Apply asymmetric PLC axis limits and the motor-axis speed limit."""
-    vx = float(vx_mm_s)
-    vy = float(vy_mm_s)
-    if not math.isfinite(vx) or not math.isfinite(vy):
-        raise ValueError("Target velocity components must be finite")
-
-    vx = max(-MAX_LATERAL_SPEED_MM_S, min(MAX_LATERAL_SPEED_MM_S, vx))
-    vy_limit = MAX_FORWARD_SPEED_MM_S if vy < 0.0 else MAX_REVERSE_SPEED_MM_S
-    vy = max(-vy_limit, min(vy_limit, vy))
-    motor_speed = max(abs(vx - vy), abs(vx + vy))
-    scale = MAX_MOTOR_SPEED_MM_S / motor_speed if motor_speed > MAX_MOTOR_SPEED_MM_S else 1.0
-    if scale < 1.0:
-        vx *= scale
-        vy *= scale
-    return vx, vy
+    vx_mps, vy_mps = limit_plc_velocity_mps(
+        float(vx_mm_s) / 1000.0,
+        float(vy_mm_s) / 1000.0,
+    )
+    return vx_mps * 1000.0, vy_mps * 1000.0
 
 
 class OpcUaWorker(QThread):
