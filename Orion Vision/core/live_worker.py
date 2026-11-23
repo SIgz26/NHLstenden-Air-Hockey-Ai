@@ -74,6 +74,7 @@ class LiveCameraWorker(QThread):
         # do not block camera captures longer than necessary.
         self._hsv_frame_lock = QReadWriteLock()
         self._current_hsv_frame = None
+        self._current_frame: np.ndarray | None = None
 
         # General mutex for settings & state flags
         self._mutex = QMutex()
@@ -113,6 +114,9 @@ class LiveCameraWorker(QThread):
         self._last_calibration_marker_time = 0.0
         self.show_table_overlay = True
         self._table_calibration_preview: tuple[tuple[float, float], ...] = ()
+        self._auto_calibration_circles: tuple[
+            tuple[float, float, float], ...
+        ] = ()
 
         # Fisheye correction: applied before HSV detection so the live feed
         # and the processed result are both corrected in one pipeline step.
@@ -166,6 +170,16 @@ class LiveCameraWorker(QThread):
         self._hsv_frame_lock.lockForRead()
         try:
             frame = self._current_hsv_frame
+            return frame.copy() if frame is not None else None
+        finally:
+            self._hsv_frame_lock.unlock()
+
+    @property
+    def current_frame(self) -> np.ndarray | None:
+        """Thread-safe read of the latest corrected BGR frame."""
+        self._hsv_frame_lock.lockForRead()
+        try:
+            frame = self._current_frame
             return frame.copy() if frame is not None else None
         finally:
             self._hsv_frame_lock.unlock()
@@ -276,6 +290,12 @@ class LiveCameraWorker(QThread):
     ) -> None:
         """Update partial manual corner points displayed over the camera feed."""
         self._table_calibration_preview = tuple(corners[:4])
+
+    def set_auto_calibration_preview(
+        self, circles: tuple[tuple[float, float, float], ...]
+    ) -> None:
+        """Show the detected circles alongside the calibrated table outline."""
+        self._auto_calibration_circles = tuple(circles[:4])
 
     def _refresh_fisheye_maps(self, frame: np.ndarray) -> None:
         h, w = frame.shape[:2]
@@ -449,6 +469,7 @@ class LiveCameraWorker(QThread):
             # Store HSV frame for the colour-picker (write lock)
             self._hsv_frame_lock.lockForWrite()
             self._current_hsv_frame = hsv
+            self._current_frame = frame.copy()
             self._hsv_frame_lock.unlock()
 
             # Read HSV bounds under the general mutex
@@ -490,7 +511,12 @@ class LiveCameraWorker(QThread):
             draw_table_overlay(
                 result,
                 self._table_calibration_preview or self.sim_bridge.get_table_corners(),
-                enabled=self.show_table_overlay or bool(self._table_calibration_preview),
+                enabled=(
+                    self.show_table_overlay
+                    or bool(self._table_calibration_preview)
+                    or bool(self._auto_calibration_circles)
+                ),
+                detected_circles=self._auto_calibration_circles,
             )
             vision_elapsed_ms = (time.perf_counter() - vision_start) * 1000.0
             self._capture_times_ms.append(capture_elapsed_ms)

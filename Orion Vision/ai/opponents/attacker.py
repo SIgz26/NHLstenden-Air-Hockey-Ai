@@ -1,5 +1,6 @@
 import numpy as np
 from .base_opponent import BaseOpponent
+from core.coordinate_contract import PUCK_RADIUS_M as CONTRACT_PUCK_RADIUS_M
 
 class AttackerOpponent(BaseOpponent):
     """Agressieve tegenstander die de puck opzoekt zodra deze op zijn helft komt."""
@@ -28,7 +29,7 @@ class ComplexOpponent(BaseOpponent):
     en adaptieve reactiesnelheden.
     """
 
-    PUCK_RADIUS = 0.031
+    PUCK_RADIUS_M = CONTRACT_PUCK_RADIUS_M
     WALL_MARGIN = 0.01
     
     def __init__(
@@ -56,7 +57,7 @@ class ComplexOpponent(BaseOpponent):
     ) -> float:
         px, py = puck_pos
         vx, vy = puck_vel
-        y_limit = (field_width / 2.0) - self.PUCK_RADIUS
+        y_limit = (field_width / 2.0) - self.PUCK_RADIUS_M
 
         if vx <= 0.05: # Puck komt niet naar ons toe
             return float(np.clip(py, -y_limit, y_limit))
@@ -112,7 +113,7 @@ class ComplexOpponent(BaseOpponent):
         if self.state == "RETREAT":
             # VOORKOM EIGEN DOELPUNT: Als de puck tussen ons en het doel ligt, 
             # beweeg dan eerst naar de zijkant (Y-as) voordat we naar achteren (X-as) gaan.
-            side_threshold = mallet_radius + self.PUCK_RADIUS + 0.05
+            side_threshold = mallet_radius + self.PUCK_RADIUS_M + 0.05
             if abs(oy - py) < side_threshold and px > ox:
                 # Ga opzij
                 target_y = y_limit * np.sign(py if py != 0 else 1.0)
@@ -133,7 +134,7 @@ class ComplexOpponent(BaseOpponent):
             future_puck = puck_pos + puck_vel * 0.05
             
             # Positioneer achter de toekomstige puck
-            strike_pos = future_puck - goal_vec * (mallet_radius + self.PUCK_RADIUS)
+            strike_pos = future_puck - goal_vec * (mallet_radius + self.PUCK_RADIUS_M)
             target = strike_pos
 
         else: # DEFEND

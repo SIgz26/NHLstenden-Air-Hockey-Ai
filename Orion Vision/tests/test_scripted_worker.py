@@ -10,6 +10,7 @@ import numpy as np
 from ai.opponents.base_opponent import BaseOpponent
 from ai.opponents.striker_defender import StrikerDefenderOpponent
 from ai.scripted_worker import OPPONENTS, ScriptedOpponentWorker
+from core.coordinate_contract import MALLET_RADIUS_M
 from core.sim_bridge import SimBridge
 
 
@@ -81,7 +82,7 @@ def test_scripted_worker_converts_physical_axes_and_limits_speed(monkeypatch) ->
     np.testing.assert_allclose(mallet_pos, [0.3679, 0.0], atol=1e-6)
     assert field_length == 1.94
     assert field_width == 1.02
-    assert mallet_radius == 0.048
+    assert mallet_radius == MALLET_RADIUS_M
     assert worker._period_ns == 10_000_000
 
 
@@ -217,7 +218,7 @@ def test_striker_defender_hysteresis_avoids_mode_chatter():
         opponent_pos=np.asarray([0.0, 0.0]),
         field_length=1.94,
         field_width=1.02,
-        mallet_radius=0.048,
+        mallet_radius=MALLET_RADIUS_M,
     )
 
     opponent.get_action(puck_pos=np.asarray([0.3, 0.0]), **args)
@@ -234,7 +235,7 @@ def test_striker_defender_waits_until_puck_leaves_after_completed_strike():
         opponent_pos=np.asarray([0.41, 0.0]),
         field_length=1.94,
         field_width=1.02,
-        mallet_radius=0.048,
+        mallet_radius=MALLET_RADIUS_M,
     )
 
     strike = opponent.get_action(

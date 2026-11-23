@@ -9,6 +9,16 @@ from PyQt5.QtCore import QPointF, QRectF, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QFont, QPaintEvent, QPainter, QPen, QPolygonF
 from PyQt5.QtWidgets import QDialog, QVBoxLayout, QSizePolicy, QWidget
 
+from core.coordinate_contract import (
+    MALLET_DIAMETER_M as CONTRACT_MALLET_DIAMETER_M,
+    MALLET_PUCK_COLLISION_DISTANCE_M as CONTRACT_MALLET_PUCK_COLLISION_DISTANCE_M,
+    MALLET_RADIUS_M as CONTRACT_MALLET_RADIUS_M,
+    PUCK_DIAMETER_M as CONTRACT_PUCK_DIAMETER_M,
+    PUCK_RADIUS_M as CONTRACT_PUCK_RADIUS_M,
+    TABLE_LENGTH_M,
+    TABLE_WIDTH_M,
+)
+
 if TYPE_CHECKING:
     from core.sim_bridge import SimBridge
 
@@ -25,7 +35,14 @@ class DigitalTwinWidget(QWidget):
     values. All values are normalized to the range ``[-1, 1]``.
     """
 
-    FIELD_ASPECT_RATIO = 1.8
+    FIELD_WIDTH_MM = TABLE_LENGTH_M * 1000.0
+    FIELD_DEPTH_MM = TABLE_WIDTH_M * 1000.0
+    FIELD_ASPECT_RATIO = FIELD_WIDTH_MM / FIELD_DEPTH_MM
+    MALLET_DIAMETER_M = CONTRACT_MALLET_DIAMETER_M
+    MALLET_RADIUS_M = CONTRACT_MALLET_RADIUS_M
+    PUCK_DIAMETER_M = CONTRACT_PUCK_DIAMETER_M
+    PUCK_RADIUS_M = CONTRACT_PUCK_RADIUS_M
+    MALLET_PUCK_COLLISION_DISTANCE_M = CONTRACT_MALLET_PUCK_COLLISION_DISTANCE_M
     CENTER_CIRCLE_RADIUS_RATIO = 0.12
     ACTION_PIXELS_PER_MPS = 100.0
     MIN_ACTION_VECTOR_PIXELS = 40.0
@@ -248,9 +265,22 @@ class DigitalTwinWidget(QWidget):
         )
 
     @staticmethod
-    def _robot_marker_radius(field: QRectF) -> float:
+    def _physical_radius_pixels(field: QRectF, radius_m: float) -> float:
+        pixels_per_meter = min(
+            field.width() / TABLE_LENGTH_M,
+            field.height() / TABLE_WIDTH_M,
+        )
+        return radius_m * pixels_per_meter
+
+    @classmethod
+    def _robot_marker_radius(cls, field: QRectF) -> float:
         """Return the exact radius used by the painted robot mallet."""
-        return max(9.0, min(field.width(), field.height()) * 0.075)
+        return cls._physical_radius_pixels(field, CONTRACT_MALLET_RADIUS_M)
+
+    @classmethod
+    def _puck_marker_radius(cls, field: QRectF) -> float:
+        """Return the puck radius in pixels at the field's physical scale."""
+        return cls._physical_radius_pixels(field, CONTRACT_PUCK_RADIUS_M)
 
     def _robot_point(self, field: QRectF) -> QPointF:
         """Map PLC-Y from the robot goal to the center line."""
@@ -403,7 +433,7 @@ class DigitalTwinWidget(QWidget):
 
         puck_x, puck_y, puck_vx, puck_vy = map(float, self._observation[:4])
         puck_center = self._puck_point(field, puck_x, puck_y)
-        radius = max(4.0, min(field.width(), field.height()) * 0.035)
+        radius = self._puck_marker_radius(field)
 
         if self._sim_bridge is not None:
             trajectory = self._sim_bridge.predict_puck_trajectory()
@@ -467,7 +497,7 @@ class DigitalTwinWidget(QWidget):
         opponent_center = self._field_point(
             field, self._observation[4], self._observation[5]
         )
-        opponent_radius = max(8.0, min(field.width(), field.height()) * 0.065)
+        opponent_radius = self._robot_marker_radius(field)
         painter.setPen(QPen(QColor("#ffb4a2"), 2.0))
         painter.setBrush(QColor("#d94f45"))
         painter.drawEllipse(opponent_center, opponent_radius, opponent_radius)

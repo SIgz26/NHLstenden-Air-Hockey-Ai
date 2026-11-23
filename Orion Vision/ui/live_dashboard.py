@@ -13,7 +13,10 @@ from PyQt5.QtWidgets import (
 
 from core.live_worker import LiveCameraWorker
 from core.gige_worker import GigECameraWorker, VMBPY_AVAILABLE
-from core.auto_calibration import ManualTableCalibrator
+from core.auto_calibration import (
+    ManualTableCalibrator,
+    auto_detect_table_corners,
+)
 from core.sim_bridge import SimBridge
 from ai.agent_worker import SACAgentWorker
 from ai.scripted_worker import ScriptedOpponentWorker
@@ -218,9 +221,14 @@ class OrionLiveDashboard(QWidget):
         self.chk_show_table_overlay.toggled.connect(self._on_toggle_table_overlay)
         layout.addWidget(self.chk_show_table_overlay)
 
+        calibration_buttons = QHBoxLayout()
         self.btn_calibrate_table_corners = QPushButton("CALIBRATE TABLE CORNERS")
         self.btn_calibrate_table_corners.clicked.connect(self._start_table_calibration)
-        layout.addWidget(self.btn_calibrate_table_corners)
+        calibration_buttons.addWidget(self.btn_calibrate_table_corners)
+        self.btn_auto_calibrate_table = QPushButton("Auto-Kalibreer (4 Cirkels)")
+        self.btn_auto_calibrate_table.clicked.connect(self._auto_calibrate_table)
+        calibration_buttons.addWidget(self.btn_auto_calibrate_table)
+        layout.addLayout(calibration_buttons)
         self.btn_reset_table_corners = QPushButton("RESET CORNERS")
         self.btn_reset_table_corners.clicked.connect(self._reset_table_corners)
         layout.addWidget(self.btn_reset_table_corners)
@@ -1343,9 +1351,67 @@ class OrionLiveDashboard(QWidget):
         self._calibration_frame_size = (width, height)
         self._manual_table_calibrator.reset()
         worker.set_table_calibration_preview(())
+        worker.set_auto_calibration_preview(())
         self.feed_primary.set_table_calibration_mode(True)
         self.btn_calibrate_table_corners.setText("CLICK TABLE CORNERS (0/4)")
         self.status_label.setText("Klik op de tafelpunten in volgorde: TL, TR, BR, BL.")
+
+    def _auto_calibrate_table(self) -> None:
+        """Detect the four face-off circles and commit their projected corners."""
+        worker = self.live_worker
+        if worker is None or not worker.isRunning():
+            self.status_label.setText("Start eerst de live camera voor kalibratie.")
+            return
+        frame = worker.current_frame
+        if frame is None:
+            self.status_label.setText("Wacht tot het eerste camerabeeld beschikbaar is.")
+            return
+
+        try:
+            detection = auto_detect_table_corners(
+                frame, is_rgb=False, return_details=True
+            )
+        except (ValueError, cv2.error, np.linalg.LinAlgError) as exc:
+            self.status_label.setText(f"Automatische kalibratie mislukt: {exc}")
+            return
+        if detection is None:
+            self.status_label.setText(
+                "Vier cirkels niet betrouwbaar gevonden; gebruik handmatige kalibratie."
+            )
+            return
+
+        self._stop_active_controller()
+        try:
+            self._manual_table_calibrator.reset()
+            for point in detection.corners_px:
+                self._manual_table_calibrator.add_corner(point)
+            self._manual_table_calibrator.apply(worker.sim_bridge)
+            worker.sim_bridge.configure_physical_table_bounds()
+        except (ValueError, RuntimeError) as exc:
+            self._manual_table_calibrator.reset()
+            self.status_label.setText(f"Automatische kalibratie ongeldig: {exc}")
+            return
+
+        frame_size = (frame.shape[1], frame.shape[0])
+        self._save_table_calibration(detection.corners_px, frame_size)
+        worker.set_table_calibration_preview(())
+        worker.set_auto_calibration_preview(
+            tuple(
+                (center[0], center[1], radius)
+                for center, radius in zip(
+                    detection.circle_centers_px, detection.circle_radii_px
+                )
+            )
+        )
+        self.feed_primary.set_table_calibration_mode(False)
+        self.btn_calibrate_table_corners.setText("CALIBRATE TABLE CORNERS")
+        self._calibration_frame_size = None
+        self._manual_table_calibrator.reset()
+        self._refresh_alignment_enabled()
+        self.status_label.setText(
+            "Auto-tafelkalibratie opgeslagen; cirkels en buitenrand zijn zichtbaar."
+        )
+        self._start_selected_controller()
 
     def _on_table_corner_picked(self, norm_x: float, norm_y: float) -> None:
         """Record one normalized live-image click and commit after four points."""
@@ -1455,6 +1521,7 @@ class OrionLiveDashboard(QWidget):
         worker = self.live_worker
         if worker is not None:
             worker.set_table_calibration_preview(())
+            worker.set_auto_calibration_preview(())
             frame = worker.current_hsv_frame
             if frame is not None:
                 height, width = frame.shape[:2]

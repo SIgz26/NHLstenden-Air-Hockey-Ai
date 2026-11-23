@@ -10,13 +10,18 @@ from core.coordinate_contract import (
     CONTROL_DT_S,
     FIELD_LENGTH_M as CONTRACT_FIELD_LENGTH_M,
     FIELD_WIDTH_M as CONTRACT_FIELD_WIDTH_M,
+    MALLET_DIAMETER_M as CONTRACT_MALLET_DIAMETER_M,
     MALLET_FORWARD_MAX_SPEED_MPS,
     MALLET_LATERAL_MAX_SPEED_MPS,
     MALLET_MAX_ACCELERATION_MPS2,
+    MALLET_PUCK_COLLISION_DISTANCE_M as CONTRACT_MALLET_PUCK_COLLISION_DISTANCE_M,
+    MALLET_RADIUS_M as CONTRACT_MALLET_RADIUS_M,
     MALLET_REVERSE_MAX_SPEED_MPS,
     MAX_RELATIVE_SPEED_MPS as CONTRACT_MAX_RELATIVE_SPEED_MPS,
     MOTOR_MAX_SPEED_MPS,
     PUCK_MAX_SPEED_MPS as CONTRACT_PUCK_MAX_SPEED_MPS,
+    PUCK_DIAMETER_M as CONTRACT_PUCK_DIAMETER_M,
+    PUCK_RADIUS_M as CONTRACT_PUCK_RADIUS_M,
     ROBOT_LENGTH_BOUNDS_M,
     ROBOT_WIDTH_BOUNDS_M,
     action_to_velocity_mps,
@@ -58,9 +63,12 @@ class AirHockeyGymEnv(gym.Env[np.ndarray, np.ndarray]):
 
     FIELD_LENGTH_M = CONTRACT_FIELD_LENGTH_M
     FIELD_WIDTH_M = CONTRACT_FIELD_WIDTH_M
-    PUCK_RADIUS_M = 0.031
+    PUCK_DIAMETER_M = CONTRACT_PUCK_DIAMETER_M
+    PUCK_RADIUS_M = CONTRACT_PUCK_RADIUS_M
     PUCK_MASS_KG = 0.020
-    MALLET_RADIUS_M = 0.048
+    MALLET_DIAMETER_M = CONTRACT_MALLET_DIAMETER_M
+    MALLET_RADIUS_M = CONTRACT_MALLET_RADIUS_M
+    MALLET_PUCK_COLLISION_DISTANCE_M = CONTRACT_MALLET_PUCK_COLLISION_DISTANCE_M
     MALLET_MASS_KG = 0.110
     RESTITUTION = 0.85
     WALL_DAMPING = 0.90
@@ -468,7 +476,7 @@ class AirHockeyGymEnv(gym.Env[np.ndarray, np.ndarray]):
         """Resolve an elastic circle impact and remove puck/mallet overlap."""
         displacement = self._puck_position - mallet_position
         distance = float(np.linalg.norm(displacement))
-        combined_radius = self.PUCK_RADIUS_M + self.MALLET_RADIUS_M
+        combined_radius = self.MALLET_PUCK_COLLISION_DISTANCE_M
         if distance > combined_radius:
             return False
 

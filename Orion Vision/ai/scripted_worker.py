@@ -13,6 +13,7 @@ from ai.opponents.attacker import AttackerOpponent, ComplexOpponent
 from ai.opponents.base_opponent import BaseOpponent
 from ai.opponents.defender import DefenderOpponent
 from ai.opponents.striker_defender import StrikerDefenderOpponent
+from core.coordinate_contract import MALLET_RADIUS_M
 from core.opcua_worker import limit_velocity
 from core.sim_bridge import SimBridge
 
@@ -115,7 +116,7 @@ class ScriptedOpponentWorker(QThread):
                 opponent_pos=mallet_pos_m,
                 field_length=field_length_mm / 1000.0,
                 field_width=field_width_mm / 1000.0,
-                mallet_radius=0.048,
+                mallet_radius=MALLET_RADIUS_M,
             ),
             dtype=np.float64,
         ).reshape(-1)

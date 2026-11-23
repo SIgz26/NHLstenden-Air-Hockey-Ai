@@ -86,7 +86,8 @@ class MatchFieldWidget(DigitalTwinWidget):
         painter.setRenderHint(QPainter.Antialiasing, True)
         painter.setPen(QPen(QColor("#9be564"), 2.0, Qt.DashLine))
         painter.setBrush(Qt.NoBrush)
-        painter.drawEllipse(point, 13.0, 13.0)
+        mallet_radius = self._robot_marker_radius(field)
+        painter.drawEllipse(point, mallet_radius, mallet_radius)
         painter.end()
 
 

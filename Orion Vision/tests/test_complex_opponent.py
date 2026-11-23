@@ -9,6 +9,7 @@ import numpy as np
 
 from ai.opponents.attacker import ComplexOpponent
 from ai.scripted_worker import ScriptedOpponentWorker
+from core.coordinate_contract import MALLET_RADIUS_M
 from core.sim_bridge import SimBridge
 
 
@@ -24,7 +25,7 @@ def _action(
         opponent_pos=np.asarray(opponent_pos, dtype=np.float64),
         field_length=2.0,
         field_width=1.0,
-        mallet_radius=0.048,
+        mallet_radius=MALLET_RADIUS_M,
     )
 
 

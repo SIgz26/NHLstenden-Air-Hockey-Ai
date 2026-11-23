@@ -448,7 +448,7 @@ def test_circle_impact_uses_restitution_and_separates_overlap():
         env._robot_velocity,
     )
 
-    combined_radius = env.PUCK_RADIUS_M + env.MALLET_RADIUS_M
+    combined_radius = env.MALLET_PUCK_COLLISION_DISTANCE_M
     assert collided
     assert env._puck_position[0] >= combined_radius
     assert env._puck_velocity[0] > 0.0

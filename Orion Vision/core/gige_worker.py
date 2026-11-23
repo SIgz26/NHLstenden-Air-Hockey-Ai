@@ -118,6 +118,7 @@ class GigECameraWorker(QThread):
 
         self._hsv_frame_lock                       = QReadWriteLock()
         self._current_hsv_frame: np.ndarray | None = None
+        self._current_frame: np.ndarray | None = None
         self._mutex                                = QMutex()
 
         self.h_min, self.h_max = 35, 95
@@ -132,6 +133,9 @@ class GigECameraWorker(QThread):
         self.aruco_tracker = ArUcoMalletTracker()
         self.show_table_overlay = True
         self._table_calibration_preview: tuple[tuple[float, float], ...] = ()
+        self._auto_calibration_circles: tuple[
+            tuple[float, float, float], ...
+        ] = ()
 
         # Fisheye correction: applied before detection so the live feed is
         # corrected immediately when the camera starts streaming.
@@ -176,6 +180,16 @@ class GigECameraWorker(QThread):
         try:
             f = self._current_hsv_frame
             return f.copy() if f is not None else None
+        finally:
+            self._hsv_frame_lock.unlock()
+
+    @property
+    def current_frame(self) -> np.ndarray | None:
+        """Thread-safe read of the latest corrected BGR frame."""
+        self._hsv_frame_lock.lockForRead()
+        try:
+            frame = self._current_frame
+            return frame.copy() if frame is not None else None
         finally:
             self._hsv_frame_lock.unlock()
 
@@ -261,6 +275,12 @@ class GigECameraWorker(QThread):
     ) -> None:
         """Update partial manual corner points displayed over the camera feed."""
         self._table_calibration_preview = tuple(corners[:4])
+
+    def set_auto_calibration_preview(
+        self, circles: tuple[tuple[float, float, float], ...]
+    ) -> None:
+        """Show the detected circles alongside the calibrated table outline."""
+        self._auto_calibration_circles = tuple(circles[:4])
 
     def _refresh_fisheye_maps(self, frame: np.ndarray) -> None:
         h, w = frame.shape[:2]
@@ -476,6 +496,7 @@ class GigECameraWorker(QThread):
 
         self._hsv_frame_lock.lockForWrite()
         self._current_hsv_frame = hsv
+        self._current_frame = bgr.copy()
         self._hsv_frame_lock.unlock()
 
         with QMutexLocker(self._mutex):
@@ -512,7 +533,12 @@ class GigECameraWorker(QThread):
         draw_table_overlay(
             result,
             self._table_calibration_preview or self.sim_bridge.get_table_corners(),
-            enabled=self.show_table_overlay or bool(self._table_calibration_preview),
+            enabled=(
+                self.show_table_overlay
+                or bool(self._table_calibration_preview)
+                or bool(self._auto_calibration_circles)
+            ),
+            detected_circles=self._auto_calibration_circles,
         )
 
         self.frame_processed.emit(

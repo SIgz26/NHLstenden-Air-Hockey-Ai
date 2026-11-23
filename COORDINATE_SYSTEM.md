@@ -23,6 +23,9 @@
 
 ## 2. Volledige Tafel vs. Robot Werkgebied (Python / Camera / AI)
 - **Volledige fysieke tafel (Camera 4-punts kalibratie & Puck):** `1940 mm` (lengte goal-to-goal) × `1020 mm` (breedte side-to-side), met middenlijn op `0 mm`.
+- **Mallet:** diameter `95.0 mm`, straal `47.5 mm`.
+- **Puck:** diameter `73.0 mm`, straal `36.5 mm`; contactafstand hart-op-hart `84.0 mm`.
+- De gedeelde SI- en mm-constanten staan in `Orion Vision/core/coordinate_contract.py`; zie ook [de fysieke coördinatenreferentie](docs/coordinate_reference.md).
 - **4-punts Camerahomografie volgorde (`TL, TR, BR, BL`):**
   - `1 (TL)`: Tegenstander-kant, zijwand `X_min` (`-510 mm, -970 mm`)
   - `2 (TR)`: Tegenstander-kant, zijwand `X_max` (`+510 mm, -970 mm`)

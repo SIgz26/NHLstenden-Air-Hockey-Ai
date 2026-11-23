@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from core.coordinate_contract import PUCK_RADIUS_M as CONTRACT_PUCK_RADIUS_M
+
 from .base_opponent import BaseOpponent
 
 
@@ -18,7 +20,7 @@ class StrikerDefenderOpponent(BaseOpponent):
     MAX_LENGTH_M = 0.61
     MAX_WIDTH_M = 0.40
     GOAL_GUARD_WIDTH_M = 0.18
-    PUCK_RADIUS_M = 0.031
+    PUCK_RADIUS_M = CONTRACT_PUCK_RADIUS_M
 
     # Mode thresholds
     CLEAR_START_MIN_LENGTH_M = 0.06

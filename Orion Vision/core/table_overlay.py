@@ -8,12 +8,14 @@ import cv2
 import numpy as np
 
 CornerPoints = Sequence[tuple[float, float]]
+CircleMarkers = Sequence[tuple[float, float, float]]
 
 
 def draw_table_overlay(
     frame: np.ndarray,
     corners: CornerPoints | None,
     enabled: bool = True,
+    detected_circles: CircleMarkers = (),
 ) -> np.ndarray:
     """Draw the calibrated table outline, corner dots, and corner labels.
 
@@ -21,36 +23,42 @@ def draw_table_overlay(
     source-frame pixel coordinates ordered ``TL, TR, BR, BL``. One to four
     points are accepted for live manual-calibration previews.
     """
-    if not enabled or corners is None or not 1 <= len(corners) <= 4:
+    if not enabled:
         return frame
 
-    points = np.asarray(
-        [[round(x), round(y)] for x, y in corners], dtype=np.int32
-    ).reshape((-1, 1, 2))
-    cv2.polylines(
-        frame,
-        [points],
-        isClosed=len(corners) == 4,
-        color=(255, 255, 0),
-        thickness=2,
-    )
-
-    labels = ("TL", "TR", "BR", "BL")
-    height, width = frame.shape[:2]
-    for point, label in zip(points.reshape(4, 2), labels):
-        x, y = int(point[0]), int(point[1])
-        cv2.circle(frame, (x, y), 6, (0, 255, 255), thickness=-1)
-        cv2.circle(frame, (x, y), 8, (20, 20, 20), thickness=1)
-        text_x = min(max(x + 8, 0), max(0, width - 30))
-        text_y = min(max(y - 8, 14), max(14, height - 2))
-        cv2.putText(
+    if corners is not None and 1 <= len(corners) <= 4:
+        points = np.asarray(
+            [[round(x), round(y)] for x, y in corners], dtype=np.int32
+        ).reshape((-1, 1, 2))
+        cv2.polylines(
             frame,
-            label,
-            (text_x, text_y),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.45,
-            (255, 255, 0),
-            1,
-            cv2.LINE_AA,
+            [points],
+            isClosed=len(corners) == 4,
+            color=(255, 255, 0),
+            thickness=2,
         )
+
+    height, width = frame.shape[:2]
+    if corners is not None and 1 <= len(corners) <= 4:
+        labels = ("TL", "TR", "BR", "BL")
+        for point, label in zip(points.reshape(-1, 2), labels):
+            x, y = int(point[0]), int(point[1])
+            cv2.circle(frame, (x, y), 6, (0, 255, 255), thickness=-1)
+            cv2.circle(frame, (x, y), 8, (20, 20, 20), thickness=1)
+            text_x = min(max(x + 8, 0), max(0, width - 30))
+            text_y = min(max(y - 8, 14), max(14, height - 2))
+            cv2.putText(
+                frame,
+                label,
+                (text_x, text_y),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.45,
+                (255, 255, 0),
+                1,
+                cv2.LINE_AA,
+            )
+    for center_x, center_y, radius in detected_circles:
+        center = (round(center_x), round(center_y))
+        cv2.circle(frame, center, round(radius), (0, 165, 255), thickness=2)
+        cv2.circle(frame, center, 2, (255, 255, 255), thickness=-1)
     return frame

@@ -30,6 +30,15 @@ def test_overlay_can_be_disabled_or_skips_uncalibrated_frame():
     np.testing.assert_array_equal(frame, original)
 
 
+def test_overlay_shows_auto_detected_circle_markers_without_corners():
+    frame = np.zeros((100, 100, 3), dtype=np.uint8)
+
+    draw_table_overlay(frame, None, detected_circles=((50.0, 50.0, 12.0),))
+
+    np.testing.assert_array_equal(frame[50, 62], [0, 165, 255])
+    np.testing.assert_array_equal(frame[50, 50], [255, 255, 255])
+
+
 def test_manual_corners_are_used_by_perspective_transform():
     bridge = SimBridge()
     corners = ((25.0, 20.0), (275.0, 38.0), (260.0, 220.0), (42.0, 205.0))
