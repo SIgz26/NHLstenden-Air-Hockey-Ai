@@ -12,7 +12,7 @@ from PyQt5.QtCore import QThread, pyqtSignal
 from ai.opponents.attacker import AttackerOpponent, ComplexOpponent
 from ai.opponents.base_opponent import BaseOpponent
 from ai.opponents.defender import DefenderOpponent
-from ai.opponents.striker_defender import StrikerDefenderOpponent
+from ai.opponents.striker_defender import SimpleStrikerOpponent
 from core.coordinate_contract import MALLET_RADIUS_M
 from core.opcua_worker import limit_velocity
 from core.sim_bridge import SimBridge
@@ -23,7 +23,7 @@ OPPONENTS: dict[str, type[BaseOpponent]] = {
     "Complex Opponent": ComplexOpponent,
     "Attacker": AttackerOpponent,
     "Defender": DefenderOpponent,
-    "Striker Defender": StrikerDefenderOpponent,
+    "Striker Defender": SimpleStrikerOpponent,
 }
 
 

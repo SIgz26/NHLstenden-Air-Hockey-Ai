@@ -1,4 +1,4 @@
-"""Smooth closed-loop defender and controlled counter-pusher (no open-loop strike)."""
+"""Eenvoudige, instelbare slag-opponent om slagvormen op de fysieke H-bot te testen."""
 
 from __future__ import annotations
 
@@ -9,42 +9,45 @@ from core.coordinate_contract import PUCK_RADIUS_M as CONTRACT_PUCK_RADIUS_M
 from .base_opponent import BaseOpponent
 
 
-class StrikerDefenderOpponent(BaseOpponent):
-    """Defend the goal with discipline and smoothly push slow pucks back."""
+class SimpleStrikerOpponent(BaseOpponent):
+    """Wacht achterin, en slaat zodra de puck voor de mallet komt."""
 
-    # Aligned with CODESYS GVL_Kin: rFieldYMin=53.7 mm (0.0 m), rFieldYMax=789.5 mm (0.7358 m),
-    # and rEdgeMargin=95.0 mm (zero-speed boundary at 0.095 m front and 0.6408 m back).
-    DEFEND_LENGTH_M = 0.58
-    MIN_LENGTH_M = 0.14
-    MIN_PUSH_LENGTH_M = 0.22
-    MAX_LENGTH_M = 0.61
-    MAX_WIDTH_M = 0.40
-    GOAL_GUARD_WIDTH_M = 0.18
-    PUCK_RADIUS_M = CONTRACT_PUCK_RADIUS_M
+    # Kies slagvorm om te testen op de tafel:
+    # - "CHARGE_AND_SNAP": eerst uitlijnen in breedte, dan recht naar voren uithalen (1.0 m/s H-bot voordeel)
+    # - "DIRECT_THROUGH" : direct diagonaal door de puck heen slaan richting tegenstandersdoel
+    STRIKE_STYLE = "CHARGE_AND_SNAP"
+    AIM_AT_GOAL = False  # False = recht vooruit slaan (makkelijkst te tunen), True = richten op (-0.97, 0.0)
 
-    # Mode thresholds
-    CLEAR_START_MIN_LENGTH_M = 0.06
-    CLEAR_START_MAX_LENGTH_M = 0.55
-    CLEAR_EXIT_LENGTH_M = 0.02
-    CLEAR_MAX_PUCK_SPEED_MPS = 0.45
-    INCOMING_VEL_THRESHOLD_MPS = 0.06
+    # Werkruimte (in meters vanaf middenlijn = 0.0 m; eigen achterwand = +0.7358 m)
+    HOME_LENGTH_M = 0.56          # Wachtpositie achterin (geeft aanloopruimte)
+    MIN_LENGTH_M = 0.11           # Voorste grens (blijft veilig voor de middenlijn-remzone)
+    MAX_LENGTH_M = 0.66           # Achterste grens
+    MAX_WIDTH_M = 0.42            # Zijwaartse grens
 
-    # Smooth motion limits (no 0.0 -> 1.0 m/s step jumps)
-    DEFEND_SPEED_MPS = 0.70
-    ALIGN_SPEED_MPS = 0.50
-    PUSH_SPEED_MPS = 0.65
-    MAX_ACCEL_MPS2 = 2.4
+    # Trigger-gebied: "als de puck voor hem is"
+    STRIKE_ZONE_MIN_LENGTH_M = 0.08   # Niet vlak op de middenlijn nog aanzetten
+    STRIKE_ZONE_MAX_LENGTH_M = 0.54   # Alleen slaan als puck echt vóór de wachtpositie ligt
+    PUCK_FRONT_CLEARANCE_M = 0.03     # Puck moet minstens 3 cm vóór de mallet liggen
+
+    # Snelheden & acceleratie (veilig voor tandriemen)
+    HOME_SPEED_MPS = 0.65
+    ALIGN_SPEED_MPS = 0.80
+    STRIKE_FORWARD_SPEED_MPS = 0.95   # Voorwaartse slagsnelheid (max 1.0 m/s op PLC)
+    STRIKE_SIDE_SPEED_MPS = 0.80      # Zijwaartse slagsnelheid (max 0.85 m/s op PLC)
+    MAX_ACCEL_MPS2 = 2.6
     CONTROL_DT_S = 0.01
 
-    DEFEND_KP = 3.6
-    ALIGN_KP = 3.4
-    PUSH_KP = 4.2
-    ALIGN_CLEARANCE_M = 0.09
+    # Slag-parameters om mee te experimenteren
+    FOLLOW_THROUGH_M = 0.14           # Hoe ver voorbij de puck de slag doorloopt
+    SNAP_WIDTH_TOLERANCE_M = 0.035    # Bij CHARGE_AND_SNAP: hoe strak uitgelijnd vóór hij uithaalt
+    LOOKAHEAD_TIME_S = 0.12           # Voorspelt waar de puck over X seconden is
+    HOME_TRACK_GAIN = 0.35            # 0.0 = blijft stil in midden wachten, 0.35 = volgt puck licht in breedte
+
+    PUCK_RADIUS_M = CONTRACT_PUCK_RADIUS_M
 
     def __init__(self) -> None:
-        self.mode = "DEFEND"
-        self._push_blocked = False
-        self._push_target: np.ndarray | None = None
+        self.mode = "HOME"  # "HOME" -> "STRIKE" -> "RECOVER"
+        self._strike_target: np.ndarray | None = None
         self._prev_velocity = np.zeros(2, dtype=np.float64)
         self._prev_mallet_pos: np.ndarray | None = None
 
@@ -63,18 +66,14 @@ class StrikerDefenderOpponent(BaseOpponent):
         opponent_pos = np.asarray(opponent_pos, dtype=np.float64)
 
         puck_length, puck_width = float(puck_pos[0]), float(puck_pos[1])
-        length_velocity, width_velocity = float(puck_vel[0]), float(puck_vel[1])
-        puck_speed = float(np.hypot(length_velocity, width_velocity))
+        puck_v_len, puck_v_wid = float(puck_vel[0]), float(puck_vel[1])
 
         width_limit = min(self.MAX_WIDTH_M, field_width / 2.0 - mallet_radius)
-        puck_width_limit = max(0.05, field_width / 2.0 - self.PUCK_RADIUS_M)
-        mallet_length = float(
-            np.clip(opponent_pos[0], self.MIN_LENGTH_M, self.MAX_LENGTH_M)
-        )
+        mallet_length = float(np.clip(opponent_pos[0], self.MIN_LENGTH_M, self.MAX_LENGTH_M))
         mallet_width = float(np.clip(opponent_pos[1], -width_limit, width_limit))
         current = np.asarray([mallet_length, mallet_width], dtype=np.float64)
 
-        # Reset velocity ramp if position jumped (e.g. simulator reset)
+        # Reset snelheidsramp bij simulatie-reset
         if (
             self._prev_mallet_pos is not None
             and float(np.linalg.norm(current - self._prev_mallet_pos)) > 0.15
@@ -82,105 +81,140 @@ class StrikerDefenderOpponent(BaseOpponent):
             self._prev_velocity = np.zeros(2, dtype=np.float64)
         self._prev_mallet_pos = current.copy()
 
-        # 1. Mode transitions (DEFEND <-> ALIGN <-> PUSH)
-        if puck_length < self.CLEAR_EXIT_LENGTH_M:
-            self._reset_to_defend(block_repush=False)
-        elif self.mode == "PUSH":
-            puck_cleared = length_velocity < -0.25 or puck_length < self.CLEAR_EXIT_LENGTH_M
-            reached_push_end = (
-                self._push_target is not None
-                and float(np.linalg.norm(current - self._push_target)) <= 0.025
-            )
-            passed_puck = mallet_length < puck_length - 0.03
-            if puck_cleared or reached_push_end or passed_puck:
-                self._reset_to_defend(block_repush=True)
-        elif self.mode == "ALIGN":
-            if (
-                puck_speed > self.CLEAR_MAX_PUCK_SPEED_MPS * 1.35
-                or length_velocity > self.INCOMING_VEL_THRESHOLD_MPS * 1.5
-            ):
-                self._reset_to_defend(block_repush=False)
-        elif self.mode == "DEFEND":
-            if (
-                self._push_blocked
-                and puck_speed <= 0.15
-                and self.CLEAR_START_MIN_LENGTH_M <= puck_length <= self.CLEAR_START_MAX_LENGTH_M
-            ):
-                self._push_blocked = False
+        # Voorspel puckpositie kort vooruit zodat we niet achter een bewegende puck aan slaan
+        pred_length = puck_length + puck_v_len * self.LOOKAHEAD_TIME_S
+        pred_width = float(
+            np.clip(puck_width + puck_v_wid * self.LOOKAHEAD_TIME_S, -width_limit, width_limit)
+        )
 
-            if (
-                not self._push_blocked
-                and self.CLEAR_START_MIN_LENGTH_M <= puck_length <= self.CLEAR_START_MAX_LENGTH_M
-                and puck_speed <= self.CLEAR_MAX_PUCK_SPEED_MPS
-                and length_velocity <= self.INCOMING_VEL_THRESHOLD_MPS
-            ):
-                self.mode = "ALIGN"
+        puck_in_front_zone = (
+            self.STRIKE_ZONE_MIN_LENGTH_M <= pred_length <= self.STRIKE_ZONE_MAX_LENGTH_M
+            and pred_length < mallet_length - self.PUCK_FRONT_CLEARANCE_M
+            and abs(pred_width) <= width_limit
+        )
 
-        # 2. Compute closed-loop position target and speed cap for active mode
-        if self.mode == "ALIGN":
-            target = self._alignment_target(
-                puck_length,
-                puck_width,
-                mallet_length,
-                mallet_width,
-                width_limit,
-                mallet_radius,
+        # --- 1. Toestandsmachine: HOME -> STRIKE -> RECOVER ---
+        if self.mode == "HOME":
+            if puck_in_front_zone:
+                self.mode = "STRIKE"
+                self._strike_target = self._compute_strike_target(
+                    pred_length, pred_width, width_limit, mallet_radius
+                )
+
+        elif self.mode == "STRIKE":
+            puck_hit_away = puck_v_len < -0.35 or puck_length < self.STRIKE_ZONE_MIN_LENGTH_M
+            puck_passed_us = puck_length > mallet_length + 0.02
+            reached_end = (
+                self._strike_target is not None
+                and mallet_length <= self._strike_target[0] + 0.015
             )
-            required_margin = min(0.05, max(0.03, self.MAX_LENGTH_M - puck_length))
-            if (
-                mallet_length >= puck_length + required_margin
-                and abs(mallet_width - target[1]) <= 0.035
-            ):
-                self.mode = "PUSH"
-                self._push_target = self._compute_push_target(
-                    puck_length,
-                    puck_width,
-                    width_limit,
-                )
-                target = self._push_target
-                kp = self.PUSH_KP
-                speed_cap = self.PUSH_SPEED_MPS
-            else:
-                kp = self.ALIGN_KP
-                speed_cap = self.ALIGN_SPEED_MPS
-        elif self.mode == "PUSH":
-            if self._push_target is None:
-                self._push_target = self._compute_push_target(
-                    puck_length,
-                    puck_width,
-                    width_limit,
-                )
-            target = self._push_target
-            kp = self.PUSH_KP
-            speed_cap = self.PUSH_SPEED_MPS
+            if puck_hit_away or puck_passed_us or reached_end:
+                self.mode = "RECOVER"
+                self._strike_target = None
+
+        elif self.mode == "RECOVER":
+            # Pas weer opnieuw slaan nadat de mallet terug is op de wachtlijn
+            if mallet_length >= self.HOME_LENGTH_M - 0.03:
+                self.mode = "HOME"
+
+        # --- 2. Snelheid berekenen voor actieve modus ---
+        if self.mode == "STRIKE":
+            desired_vel = self._compute_strike_velocity(
+                current=current,
+                pred_length=pred_length,
+                pred_width=pred_width,
+                width_limit=width_limit,
+                mallet_radius=mallet_radius,
+            )
         else:
-            target = self._defend_target(
-                puck_length,
-                puck_width,
-                length_velocity,
-                width_velocity,
-                width_limit,
-                puck_width_limit,
+            # HOME of RECOVER: rustig terug naar wachtpositie achterin
+            idle_width = float(
+                np.clip(puck_width * self.HOME_TRACK_GAIN, -width_limit * 0.6, width_limit * 0.6)
             )
-            kp = self.DEFEND_KP
-            speed_cap = self.DEFEND_SPEED_MPS
+            home_target = np.asarray([self.HOME_LENGTH_M, idle_width], dtype=np.float64)
+            desired_vel = (home_target - current) * 4.5
+            speed = float(np.linalg.norm(desired_vel))
+            if speed > self.HOME_SPEED_MPS:
+                desired_vel *= self.HOME_SPEED_MPS / speed
 
-        desired_velocity = (target - current) * kp
-        speed = float(np.linalg.norm(desired_velocity))
-        if speed > speed_cap:
-            desired_velocity *= speed_cap / speed
+        ramped = self._ramp_velocity(desired_vel)
+        self._prev_velocity = ramped
+        return ramped
 
-        ramped_velocity = self._ramp_velocity(desired_velocity)
-        self._prev_velocity = ramped_velocity
-        return ramped_velocity
+    def _compute_strike_target(
+        self,
+        puck_length: float,
+        puck_width: float,
+        width_limit: float,
+        mallet_radius: float,
+    ) -> np.ndarray:
+        """Berekent het eindpunt (follow-through) voorbij de puck."""
+        contact_offset = mallet_radius + self.PUCK_RADIUS_M
+        target_length = float(
+            np.clip(
+                puck_length - self.FOLLOW_THROUGH_M,
+                self.MIN_LENGTH_M,
+                self.MAX_LENGTH_M,
+            )
+        )
 
-    def _reset_to_defend(self, *, block_repush: bool) -> None:
-        self.mode = "DEFEND"
-        self._push_blocked = block_repush
-        self._push_target = None
+        if not self.AIM_AT_GOAL:
+            target_width = float(np.clip(puck_width, -width_limit, width_limit))
+            return np.asarray([target_length, target_width], dtype=np.float64)
+
+        # Richt door het middelpunt van de puck richting het tegenstandersdoel (-0.97, 0.0)
+        goal = np.asarray([-0.97, 0.0], dtype=np.float64)
+        puck = np.asarray([puck_length, puck_width], dtype=np.float64)
+        shot_dir = goal - puck
+        norm = float(np.linalg.norm(shot_dir))
+        if norm > 1e-6:
+            shot_dir /= norm
+            contact_center = puck - shot_dir * contact_offset
+            slope = shot_dir[1] / min(shot_dir[0], -1e-6)
+            target_width = contact_center[1] + slope * (target_length - contact_center[0])
+        else:
+            target_width = puck_width
+
+        target_width = float(np.clip(target_width, -width_limit, width_limit))
+        return np.asarray([target_length, target_width], dtype=np.float64)
+
+    def _compute_strike_velocity(
+        self,
+        current: np.ndarray,
+        pred_length: float,
+        pred_width: float,
+        width_limit: float,
+        mallet_radius: float,
+    ) -> np.ndarray:
+        """Geeft een constante doorslag-snelheid richting het doel i.p.v. vroegtijdig af te remmen."""
+        target = self._compute_strike_target(pred_length, pred_width, width_limit, mallet_radius)
+        self._strike_target = target
+
+        if self.STRIKE_STYLE == "CHARGE_AND_SNAP":
+            width_error = target[1] - current[1]
+            # Fase A: eerst snel op de juiste breedte komen terwijl we achterin blijven
+            if abs(width_error) > self.SNAP_WIDTH_TOLERANCE_M and current[0] > pred_length + 0.10:
+                v_len = (self.HOME_LENGTH_M - current[0]) * 4.0
+                v_wid = np.clip(width_error * 9.0, -self.ALIGN_SPEED_MPS, self.ALIGN_SPEED_MPS)
+                return np.asarray([v_len, v_wid], dtype=np.float64)
+
+            # Fase B: uitgelijnd -> vol gas recht naar voren door de puck heen!
+            v_len = -self.STRIKE_FORWARD_SPEED_MPS
+            v_wid = np.clip(width_error * 6.0, -0.35, 0.35)
+            return np.asarray([v_len, v_wid], dtype=np.float64)
+
+        # DIRECT_THROUGH: één vloeiende vector met constante slagsnelheid door het raakpunt
+        delta = target - current
+        dist = float(np.linalg.norm(delta))
+        if dist < 1e-6:
+            return np.zeros(2, dtype=np.float64)
+        direction = delta / dist
+        v_len = direction[0] * self.STRIKE_FORWARD_SPEED_MPS
+        v_wid = direction[1] * self.STRIKE_SIDE_SPEED_MPS
+        return np.asarray([v_len, v_wid], dtype=np.float64)
 
     def _ramp_velocity(self, desired_velocity: np.ndarray) -> np.ndarray:
-        """Gradually ramp velocity from 0.0 so the H-bot accelerates smoothly without jerk."""
+        """Vloeiende acceleratieramp zonder plotselinge snelheidssprongen."""
         max_delta = self.MAX_ACCEL_MPS2 * self.CONTROL_DT_S
         delta = desired_velocity - self._prev_velocity
         delta_norm = float(np.linalg.norm(delta))
@@ -188,120 +222,10 @@ class StrikerDefenderOpponent(BaseOpponent):
             delta *= max_delta / delta_norm
         velocity = self._prev_velocity + delta
 
-        # Respect asymmetric axis caps
-        vx = float(np.clip(velocity[0], -self.DEFEND_SPEED_MPS, self.DEFEND_SPEED_MPS))
-        vy = float(np.clip(velocity[1], -self.DEFEND_SPEED_MPS, self.DEFEND_SPEED_MPS))
+        vx = float(np.clip(velocity[0], -self.STRIKE_FORWARD_SPEED_MPS, self.HOME_SPEED_MPS))
+        vy = float(np.clip(velocity[1], -self.STRIKE_SIDE_SPEED_MPS, self.STRIKE_SIDE_SPEED_MPS))
         return np.asarray([vx, vy], dtype=np.float64)
 
-    def _compute_push_target(
-        self,
-        puck_length: float,
-        puck_width: float,
-        width_limit: float,
-    ) -> np.ndarray:
-        """Pick a smooth follow-through position target behind/through the puck."""
-        near_side_wall = abs(puck_width) > max(0.05, width_limit - 0.08)
-        target_length = float(
-            np.clip(puck_length - 0.14, self.MIN_PUSH_LENGTH_M, self.MAX_LENGTH_M)
-        )
-        if near_side_wall:
-            target_width = float(np.clip(puck_width, -width_limit, width_limit))
-            return np.asarray([target_length, target_width], dtype=np.float64)
 
-        goal = np.asarray([-0.97, 0.0], dtype=np.float64)
-        puck = np.asarray([puck_length, puck_width], dtype=np.float64)
-        shot_dir = goal - puck
-        if abs(float(shot_dir[0])) > 1e-6:
-            slope = float(shot_dir[1] / shot_dir[0])
-            target_width = puck_width + slope * (target_length - puck_length)
-        else:
-            target_width = puck_width
-        target_width = float(np.clip(target_width, -width_limit, width_limit))
-        return np.asarray([target_length, target_width], dtype=np.float64)
-
-    def _alignment_target(
-        self,
-        puck_length: float,
-        puck_width: float,
-        mallet_length: float,
-        mallet_width: float,
-        width_limit: float,
-        mallet_radius: float,
-    ) -> np.ndarray:
-        near_side_wall = abs(puck_width) > max(0.05, width_limit - 0.08)
-        available_back_room = max(0.04, self.MAX_LENGTH_M - puck_length)
-        clearance_behind = min(self.ALIGN_CLEARANCE_M, available_back_room)
-
-        if near_side_wall:
-            behind_puck = np.asarray(
-                [
-                    np.clip(puck_length + clearance_behind, self.MIN_LENGTH_M, self.MAX_LENGTH_M),
-                    np.clip(puck_width, -width_limit, width_limit),
-                ],
-                dtype=np.float64,
-            )
-        else:
-            goal = np.asarray([-0.97, 0.0], dtype=np.float64)
-            puck = np.asarray([puck_length, puck_width], dtype=np.float64)
-            shot_direction = goal - puck
-            shot_direction /= max(float(np.linalg.norm(shot_direction)), 1e-6)
-            behind_puck = puck - shot_direction * clearance_behind
-            behind_puck[0] = float(
-                np.clip(behind_puck[0], self.MIN_LENGTH_M, self.MAX_LENGTH_M)
-            )
-            behind_puck[1] = float(np.clip(behind_puck[1], -width_limit, width_limit))
-
-        # Route safely around the side if mallet is currently in front of the puck
-        if mallet_length < puck_length + 0.05:
-            if mallet_length > puck_length:
-                return behind_puck
-            side_clearance = mallet_radius + self.PUCK_RADIUS_M + 0.03
-            side = float(np.sign(mallet_width - puck_width))
-            if side == 0.0:
-                side = 1.0 if (width_limit - puck_width) >= (width_limit + puck_width) else -1.0
-            staging_width = float(
-                np.clip(puck_width + side * side_clearance, -width_limit, width_limit)
-            )
-            staging_length = float(
-                np.clip(
-                    puck_length - side_clearance,
-                    self.MIN_LENGTH_M,
-                    self.MAX_LENGTH_M,
-                )
-            )
-            at_staging_point = (
-                abs(mallet_length - staging_length) < 0.035
-                and abs(mallet_width - staging_width) < 0.035
-            )
-            if not at_staging_point:
-                return np.asarray([staging_length, staging_width], dtype=np.float64)
-            return np.asarray([behind_puck[0], staging_width], dtype=np.float64)
-
-        return behind_puck
-
-    def _defend_target(
-        self,
-        puck_length: float,
-        puck_width: float,
-        length_velocity: float,
-        width_velocity: float,
-        width_limit: float,
-        puck_width_limit: float,
-    ) -> np.ndarray:
-        guard_limit = min(self.GOAL_GUARD_WIDTH_M, width_limit)
-        if puck_length < 0.0 and length_velocity <= 0.05:
-            target_width = 0.0
-        else:
-            target_width = puck_width
-            if length_velocity > 0.05:
-                time_to_line = (self.DEFEND_LENGTH_M - puck_length) / length_velocity
-                if time_to_line >= 0.0:
-                    target_width += width_velocity * time_to_line
-                    if puck_width_limit > 0.0:
-                        while abs(target_width) > puck_width_limit:
-                            if target_width > puck_width_limit:
-                                target_width = 2.0 * puck_width_limit - target_width
-                            else:
-                                target_width = -2.0 * puck_width_limit - target_width
-            target_width = float(np.clip(target_width, -guard_limit, guard_limit))
-        return np.asarray([self.DEFEND_LENGTH_M, target_width], dtype=np.float64)
+# Backwards-compatible name used by existing callers and saved configurations.
+StrikerDefenderOpponent = SimpleStrikerOpponent
